@@ -126,8 +126,59 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
     completed = 0
     total = len(urls)
 
-    async with get_db() as db:
-        await update_scan_status(db, scan_id, "running", completed_urls=0)
+    # -----------------------------------------------------------------------
+    # Daily Deduplication: load all recently-cached URLs into memory ONCE
+    # (single DB query instead of 1 query per URL — prevents SQLite deadlock)
+    # -----------------------------------------------------------------------
+    _daily_cache: Dict[str, tuple] = {}  # url/domain -> (result_dict, dns_records, ssl_data)
+    try:
+        async with get_db() as db:
+            await update_scan_status(db, scan_id, "running", completed_urls=0)
+
+            # Fetch all results from the last 24 hours in one query
+            cursor = await db.execute(
+                """
+                SELECT id, original_url, final_url, domain, status,
+                       http_status_code, response_time_ms, server_info,
+                       website_title, screenshot_path, error_message
+                FROM scan_results
+                WHERE created_at >= datetime('now', '-24 hours')
+                """
+            )
+            cached_rows = await cursor.fetchall()
+            from backend.app.database.repository import _row_to_dict, _rows_to_dicts
+
+            for row in cached_rows:
+                rd = dict(row)
+                cached_id = rd["id"]
+
+                # Fetch DNS records for this cached result
+                dns_cur = await db.execute(
+                    "SELECT domain, record_type, record_value, ttl, lookup_status, error_message, lookup_time_ms "
+                    "FROM dns_records WHERE scan_result_id = ?",
+                    (cached_id,),
+                )
+                dns_rows = await dns_cur.fetchall()
+                dns_recs = [dict(r) for r in dns_rows]
+
+                # Fetch SSL details for this cached result
+                ssl_cur = await db.execute(
+                    "SELECT * FROM ssl_details WHERE scan_result_id = ? LIMIT 1",
+                    (cached_id,),
+                )
+                ssl_row = await ssl_cur.fetchone()
+                ssl_data = dict(ssl_row) if ssl_row else None
+
+                cache_entry = (rd, dns_recs, ssl_data)
+
+                # Index by original_url, domain, and final_url
+                for key in [rd.get("original_url"), rd.get("domain"), rd.get("final_url")]:
+                    if key:
+                        _daily_cache[key.lower().strip()] = cache_entry
+
+        logger.info("Daily cache: loaded %d recently-audited entries.", len(_daily_cache))
+    except Exception as cache_load_err:
+        logger.warning("Daily cache pre-load failed (proceeding without cache): %s", cache_load_err)
 
     # Concurrency control:
     # 1. URL network worker concurrency: up to 300 simultaneous checks
@@ -203,15 +254,11 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
             except Exception:
                 tentative_domain = raw_url.replace("https://", "").replace("http://", "").split("/")[0]
 
-            # Daily URL cache check: skip re-auditing if already checked in the last 24 hours
-            try:
-                async with get_db() as db:
-                    cached_data = await get_recent_cached_result(db, raw_url)
-                    if not cached_data and tentative_domain:
-                        cached_data = await get_recent_cached_result(db, tentative_domain)
-            except Exception as cache_err:
-                logger.debug("Cache check error for %s: %s", raw_url, cache_err)
-                cached_data = None
+            # Daily URL cache check: fast in-memory lookup (zero DB overhead)
+            cache_key = raw_url.lower().strip()
+            cached_data = _daily_cache.get(cache_key)
+            if not cached_data and tentative_domain:
+                cached_data = _daily_cache.get(tentative_domain.lower().strip())
 
             if cached_data:
                 cached_res, cached_dns, cached_ssl = cached_data
