@@ -21,6 +21,7 @@ import {
   Camera,
   Filter,
   Search,
+  FileSpreadsheet,
 } from 'lucide-react';
 import { useScan } from '../hooks/useScan';
 import { scanApi } from '../services/api';
@@ -91,22 +92,23 @@ export default function ScanResults() {
     }
   };
 
-  const handleDownload = async (type: 'pdf' | 'excel') => {
+  const [pdfBatch, setPdfBatch] = useState<number>(0);
+
+  const handleDownload = (type: 'pdf' | 'excel' | 'csv', batchNum?: number) => {
     if (!scanId) return;
-    setDownloadingType(type);
-    try {
-      if (type === 'pdf') {
-        const blob = await scanApi.downloadPDF(scanId);
-        downloadBlob(blob, `WebPulse_Audit_${scanId}.pdf`);
-      } else {
-        const blob = await scanApi.downloadExcel(scanId);
-        downloadBlob(blob, `WebPulse_Audit_${scanId}.xlsx`);
-      }
-    } catch (err: any) {
-      alert(`Download failed: ` + (err.message || 'Error'));
-    } finally {
-      setDownloadingType(null);
+    let url = `/api/reports/${scanId}/${type}`;
+    const selectedBatch = batchNum !== undefined ? batchNum : pdfBatch;
+    if (type === 'pdf' && selectedBatch > 0) {
+      url += `?batch=${selectedBatch}`;
     }
+
+    // Direct browser native download: NO Javascript in-memory buffering & NO 120s timeout
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', '');
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const safeResults = Array.isArray(results) ? results : [];
@@ -162,31 +164,51 @@ export default function ScanResults() {
         </div>
 
         {/* Action Buttons */}
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {total > 100 && (
+            <select
+              value={pdfBatch}
+              onChange={(e) => setPdfBatch(Number(e.target.value))}
+              className="text-xs py-2 px-2.5 rounded-lg border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 text-surface-700 dark:text-surface-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 shadow-xs cursor-pointer"
+              title="Select PDF batch to download"
+            >
+              <option value={0}>Full Audit ({total} Targets)</option>
+              {Array.from({ length: Math.ceil(total / 100) }, (_, i) => (
+                <option key={i + 1} value={i + 1}>
+                  Batch {i + 1} ({i * 100 + 1} - {Math.min((i + 1) * 100, total)})
+                </option>
+              ))}
+            </select>
+          )}
+
           <button
             onClick={() => handleDownload('pdf')}
             disabled={downloadingType !== null || loading}
-            className="btn-secondary text-xs py-2 px-3.5"
+            className="btn-secondary text-xs py-2 px-3.5 shadow-xs"
+            title="Download formatted Audit PDF Report"
           >
-            {downloadingType === 'pdf' ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            ) : (
-              <FileText className="w-3.5 h-3.5 text-rose-500" />
-            )}
+            <FileText className="w-3.5 h-3.5 text-rose-500" />
             <span>PDF Report</span>
           </button>
 
           <button
             onClick={() => handleDownload('excel')}
             disabled={downloadingType !== null || loading}
-            className="btn-secondary text-xs py-2 px-3.5"
+            className="btn-secondary text-xs py-2 px-3.5 shadow-xs"
+            title="Download formatted Excel Workbook"
           >
-            {downloadingType === 'excel' ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            ) : (
-              <TableIcon className="w-3.5 h-3.5 text-emerald-500" />
-            )}
-            <span>Excel Export</span>
+            <TableIcon className="w-3.5 h-3.5 text-blue-500" />
+            <span>Excel (.xlsx)</span>
+          </button>
+
+          <button
+            onClick={() => handleDownload('csv')}
+            disabled={downloadingType !== null || loading}
+            className="btn-secondary text-xs py-2 px-3.5 shadow-xs bg-emerald-50/50 dark:bg-emerald-950/20 border-emerald-200 dark:border-emerald-800 hover:bg-emerald-100/50 dark:hover:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300"
+            title="Instant CSV export directly importable to Google Sheets & Excel"
+          >
+            <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+            <span className="font-semibold">Google Sheets (.csv)</span>
           </button>
         </div>
       </div>

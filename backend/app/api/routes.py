@@ -737,7 +737,12 @@ async def export_time_range_excel(
 # GET /api/reports/{scan_id}/pdf
 # ---------------------------------------------------------------------------
 @router.get("/reports/{scan_id}/pdf")
-async def download_pdf_report(scan_id: str, refresh: bool = Query(False)):
+async def download_pdf_report(
+    scan_id: str,
+    refresh: bool = Query(False),
+    batch: Optional[int] = Query(None),
+    batch_size: int = Query(100),
+):
     if PDFReportGenerator is None:
         raise HTTPException(status_code=501, detail="PDF report generation is not available.")
 
@@ -748,13 +753,22 @@ async def download_pdf_report(scan_id: str, refresh: bool = Query(False)):
             raise HTTPException(status_code=404, detail="Scan not found.")
         results = await get_scan_results(db, scan_id)
 
-    filename = f"report_{scan_id}.pdf"
+    # Support batched PDF slices for large target lists (e.g. 100 targets per batch)
+    if batch is not None and batch > 0:
+        start_idx = (batch - 1) * batch_size
+        end_idx = min(start_idx + batch_size, len(results))
+        batch_results = results[start_idx:end_idx]
+        filename = f"report_{scan_id}_batch_{batch}.pdf"
+    else:
+        batch_results = results
+        filename = f"report_{scan_id}.pdf"
+
     filepath = os.path.join(settings.reports_dir, filename)
 
     # Always generate or regenerate when requested or if missing
     if refresh or not os.path.isfile(filepath):
         generator = PDFReportGenerator()
-        await generator.generate(scan=scan, results=results, output_path=filepath)
+        await generator.generate(scan=scan, results=batch_results, output_path=filepath)
 
     return FileResponse(
         filepath,
@@ -787,6 +801,65 @@ async def download_excel_report(scan_id: str):
     return FileResponse(
         filepath,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/reports/{scan_id}/csv (Google Sheets & Excel Instant Export)
+# ---------------------------------------------------------------------------
+@router.get("/reports/{scan_id}/csv")
+async def download_csv_report(scan_id: str):
+    """Instant CSV report export compatible with Google Sheets and Excel."""
+    import csv
+
+    async with get_db() as db:
+        scan = await get_scan(db, scan_id)
+        if scan is None:
+            raise HTTPException(status_code=404, detail="Scan not found.")
+        results = await get_scan_results(db, scan_id)
+
+    filename = f"WebPulse_GoogleSheets_{scan_id}.csv"
+    filepath = os.path.join(settings.reports_dir, filename)
+
+    with open(filepath, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "Domain",
+            "Status",
+            "HTTP Status Code",
+            "Response Time (ms)",
+            "Original Target URL",
+            "Final URL",
+            "Web Server",
+            "Website Title",
+            "SSL Certificate Status",
+            "DNS Status",
+            "Diagnostic Error Details",
+            "Audit Timestamp",
+        ])
+        for r in results:
+            status = r.get("status", "UNKNOWN")
+            ssl_status = "Valid" if status not in ("SSL_ERROR", "OFFLINE") else "Issue"
+            dns_status = "Resolved" if status != "DNS_ERROR" else "Failed"
+            writer.writerow([
+                r.get("domain") or "",
+                status,
+                r.get("http_status_code") or "",
+                round(r.get("response_time_ms") or 0, 1) if r.get("response_time_ms") is not None else "",
+                r.get("original_url") or "",
+                r.get("final_url") or "",
+                r.get("server_info") or "",
+                r.get("website_title") or "",
+                ssl_status,
+                dns_status,
+                r.get("error_message") or "",
+                r.get("created_at") or "",
+            ])
+
+    return FileResponse(
+        filepath,
+        media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 

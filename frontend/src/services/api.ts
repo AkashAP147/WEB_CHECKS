@@ -63,13 +63,19 @@ export const scanApi = {
     return data;
   },
 
-  downloadPDF: async (scanId: string): Promise<Blob> => {
-    const { data } = await api.get(`/reports/${scanId}/pdf`, { responseType: 'blob' });
+  downloadPDF: async (scanId: string, batch?: number): Promise<Blob> => {
+    const url = batch ? `/reports/${scanId}/pdf?batch=${batch}` : `/reports/${scanId}/pdf`;
+    const { data } = await api.get(url, { responseType: 'blob', timeout: 0 });
     return data;
   },
 
   downloadExcel: async (scanId: string): Promise<Blob> => {
-    const { data } = await api.get(`/reports/${scanId}/excel`, { responseType: 'blob' });
+    const { data } = await api.get(`/reports/${scanId}/excel`, { responseType: 'blob', timeout: 0 });
+    return data;
+  },
+
+  downloadCSV: async (scanId: string): Promise<Blob> => {
+    const { data } = await api.get(`/reports/${scanId}/csv`, { responseType: 'blob', timeout: 0 });
     return data;
   },
 
@@ -82,6 +88,7 @@ export const scanApi = {
         status: params?.status,
       },
       responseType: 'blob',
+      timeout: 0,
     });
     return data;
   },
@@ -95,6 +102,7 @@ export const scanApi = {
         status: params?.status,
       },
       responseType: 'blob',
+      timeout: 0,
     });
     return data;
   },
