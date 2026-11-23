@@ -30,7 +30,7 @@ If you prefer to start from an empty Colab notebook, paste these two cells:
 %cd WEB_CHECKS
 
 !pip install -q -r backend/requirements.txt
-!pip install -q xlrd openpyxl reportlab uvicorn fastapi httpx dnspython cryptography certifi aiosqlite playwright pydantic-settings
+!pip install -q python-multipart xlrd openpyxl reportlab uvicorn fastapi httpx dnspython cryptography certifi aiosqlite playwright pydantic-settings Pillow
 
 !playwright install chromium
 !playwright install-deps chromium

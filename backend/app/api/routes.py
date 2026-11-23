@@ -252,35 +252,39 @@ async def start_scan(request: Request):
     content_type = request.headers.get("content-type", "").lower()
     collected_urls: List[str] = []
 
-    if "multipart/form-data" in content_type:
-        form = await request.form()
-        uploaded_file = form.get("file")
-        if uploaded_file and hasattr(uploaded_file, "read"):
-            contents = await uploaded_file.read()
-            filename = getattr(uploaded_file, "filename", "") or ""
-            collected_urls = _extract_urls_from_file(contents, filename)
+    try:
+        if "multipart/form-data" in content_type:
+            form = await request.form()
+            uploaded_file = form.get("file")
+            if uploaded_file and hasattr(uploaded_file, "read"):
+                contents = await uploaded_file.read()
+                filename = getattr(uploaded_file, "filename", "") or ""
+                collected_urls = _extract_urls_from_file(contents, filename)
+            else:
+                urls_val = form.getlist("urls") or form.get("urls")
+                if isinstance(urls_val, list):
+                    collected_urls = [str(u).strip() for u in urls_val if str(u).strip()]
+                elif urls_val:
+                    collected_urls = [str(urls_val).strip()]
         else:
-            urls_val = form.getlist("urls") or form.get("urls")
-            if isinstance(urls_val, list):
-                collected_urls = [str(u).strip() for u in urls_val if str(u).strip()]
-            elif urls_val:
-                collected_urls = [str(urls_val).strip()]
-    else:
-        # JSON body
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
+            # JSON body
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
 
-        if isinstance(body, dict):
-            urls = body.get("urls")
-            url = body.get("url")
-            if urls and isinstance(urls, list):
-                collected_urls = [str(u).strip() for u in urls if str(u).strip()]
-            elif url and isinstance(url, str):
-                collected_urls = [url.strip()]
-        elif isinstance(body, list):
-            collected_urls = [str(u).strip() for u in body if str(u).strip()]
+            if isinstance(body, dict):
+                urls = body.get("urls")
+                url = body.get("url")
+                if urls and isinstance(urls, list):
+                    collected_urls = [str(u).strip() for u in urls if str(u).strip()]
+                elif url and isinstance(url, str):
+                    collected_urls = [url.strip()]
+            elif isinstance(body, list):
+                collected_urls = [str(u).strip() for u in body if str(u).strip()]
+    except Exception as exc:
+        logger.error("Error reading scan request payload: %s", exc)
+        raise HTTPException(status_code=400, detail=f"Failed to parse request payload: {exc}")
 
     if not collected_urls:
         raise HTTPException(status_code=400, detail="No URLs provided.")
@@ -294,16 +298,18 @@ async def start_scan(request: Request):
         )
         collected_urls = collected_urls[:settings.max_urls_per_scan]
 
-    # Validate each URL
+    # Validate each URL gracefully (skip headers, blank rows, or unparseable text)
     validated: List[str] = []
     for u in collected_urls:
         try:
             norm_url = validate_url(u)
-            if not is_safe_url(norm_url):
-                raise HTTPException(status_code=400, detail=f"Target URL is not allowed: {u}")
-            validated.append(norm_url)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=f"Invalid URL: {exc}")
+            if is_safe_url(norm_url):
+                validated.append(norm_url)
+        except Exception:
+            continue
+
+    if not validated:
+        raise HTTPException(status_code=400, detail="No valid URLs found in submission.")
 
     scan_id = str(uuid.uuid4())
     created_at = _now_iso()
