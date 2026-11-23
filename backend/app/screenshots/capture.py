@@ -208,6 +208,7 @@ def _sync_capture_worker(
                 browser = p.chromium.launch(
                     headless=True,
                     args=[
+                        "--disable-blink-features=AutomationControlled",
                         "--disable-gpu",
                         "--disable-dev-shm-usage",
                         "--no-sandbox",
@@ -233,11 +234,18 @@ def _sync_capture_worker(
                         user_agent=(
                             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                             "AppleWebKit/537.36 (KHTML, like Gecko) "
-                            "Chrome/122.0.0.0 Safari/537.36 WebPulse/1.0"
+                            "Chrome/124.0.0.0 Safari/537.36"
                         ),
+                        locale="en-US",
                     )
                     page = context.new_page()
                     page.set_default_navigation_timeout(timeout_ms)
+
+                    # Remove navigator.webdriver anti-bot flag
+                    try:
+                        page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+                    except Exception:
+                        pass
 
                     # Abort heavy video/audio streaming to prevent network and CPU choking
                     try:
@@ -248,27 +256,35 @@ def _sync_capture_worker(
                     except Exception:
                         pass
 
-                    # Fast, reliable navigation: wait for 'commit' so slow external trackers don't stall capture
-                    try:
-                        page.goto(url, wait_until="commit", timeout=timeout_ms)
+                    # Resilient navigation: try DOM content first, fallback to commit, then HTTP
+                    navigated = False
+                    for wait_mode in ["domcontentloaded", "commit", "load"]:
                         try:
-                            page.wait_for_load_state("domcontentloaded", timeout=min(timeout_ms, 4000))
+                            page.goto(url, wait_until=wait_mode, timeout=12000)
+                            navigated = True
+                            break
+                        except Exception:
+                            continue
+
+                    # If https failed completely, attempt http fallback
+                    if not navigated and url.startswith("https://"):
+                        http_url = url.replace("https://", "http://", 1)
+                        for wait_mode in ["domcontentloaded", "commit"]:
+                            try:
+                                page.goto(http_url, wait_until=wait_mode, timeout=10000)
+                                navigated = True
+                                break
+                            except Exception:
+                                continue
+
+                    if navigated:
+                        try:
+                            page.wait_for_timeout(600)
                         except Exception:
                             pass
-                        page.wait_for_timeout(300)
                         page.screenshot(path=abs_path, full_page=False, type="png")
                         if os.path.exists(abs_path) and os.path.getsize(abs_path) > 1000:
                             browser_captured = True
-                    except Exception as nav_err:
-                        try:
-                            # Secondary attempt with wait_until='load'
-                            page.goto(url, wait_until="load", timeout=min(timeout_ms, 8000))
-                            page.wait_for_timeout(300)
-                            page.screenshot(path=abs_path, full_page=False, type="png")
-                            if os.path.exists(abs_path) and os.path.getsize(abs_path) > 1000:
-                                browser_captured = True
-                        except Exception:
-                            pass
                 finally:
                     try:
                         browser.close()
