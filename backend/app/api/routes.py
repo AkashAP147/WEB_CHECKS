@@ -138,7 +138,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         async with get_db() as db:
             await update_scan_status(db, scan_id, "running", completed_urls=0)
 
-        # 2. Daily Deduplication: fetch recently-audited URLs in a single fast query
+        # 2. Daily Deduplication: fetch recently-audited ONLINE URLs in a single fast query
         _daily_cache: Dict[str, dict] = {}
         try:
             async with get_db() as db:
@@ -148,7 +148,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                            http_status_code, response_time_ms, server_info,
                            website_title, screenshot_path, error_message
                     FROM scan_results
-                    WHERE created_at >= datetime('now', '-24 hours')
+                    WHERE created_at >= datetime('now', '-24 hours') AND status = 'ONLINE'
                     ORDER BY id DESC
                     """
                 )
@@ -169,8 +169,9 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
             logger.warning("Daily cache pre-load failed (proceeding without cache): %s", cache_load_err)
 
         # Concurrency control:
-        # 1. URL network worker concurrency: up to 300 simultaneous checks
-        concurrency_limit = min(settings.max_concurrent_scans, 300)
+        # 1. URL network worker concurrency: 40 on Windows (150 on Colab) to prevent DNS packet drops and socket starvation
+        default_concurrency = 40 if sys.platform == "win32" else 150
+        concurrency_limit = min(settings.max_concurrent_scans, default_concurrency)
         url_semaphore = asyncio.Semaphore(concurrency_limit)
 
         # 2. Screenshot concurrency: throttle Chromium to 6 on PC (15 on Colab) to preserve CPU
@@ -361,10 +362,10 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                 await db_queue.put((http_res, dns_records, ssl_data))
 
         # Main Scan Execution Loop with Shared Persistent HTTP Client
-        limits = httpx.Limits(max_connections=600, max_keepalive_connections=200)
+        limits = httpx.Limits(max_connections=400, max_keepalive_connections=150)
         async with httpx.AsyncClient(
             limits=limits,
-            timeout=httpx.Timeout(connect=5.0, read=5.0, write=5.0, pool=8.0),
+            timeout=httpx.Timeout(connect=15.0, read=15.0, write=15.0, pool=30.0),
             follow_redirects=False,
             verify=True,
             headers={
