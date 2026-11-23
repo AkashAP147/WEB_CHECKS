@@ -98,7 +98,7 @@ async def get_scan(db: aiosqlite.Connection, scan_id: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 async def save_scan_result(
-    db: aiosqlite.Connection, scan_id: str, result_data: dict
+    db: aiosqlite.Connection, scan_id: str, result_data: dict, commit: bool = True
 ) -> int:
     """Insert a scan_result row and return its auto-generated id."""
     valid_statuses = {
@@ -132,7 +132,8 @@ async def save_scan_result(
             _utcnow_iso(),
         ),
     )
-    await db.commit()
+    if commit:
+        await db.commit()
     return cursor.lastrowid  # type: ignore[return-value]
 
 
@@ -199,6 +200,7 @@ async def save_dns_records(
     db: aiosqlite.Connection,
     scan_result_id: int,
     records_list: list[dict],
+    commit: bool = True,
 ) -> None:
     """Bulk-insert DNS record rows for a given scan result."""
     if not records_list:
@@ -224,7 +226,8 @@ async def save_dns_records(
             for r in records_list
         ],
     )
-    await db.commit()
+    if commit:
+        await db.commit()
 
 
 async def get_dns_records(
@@ -247,6 +250,7 @@ async def save_ssl_details(
     db: aiosqlite.Connection,
     scan_result_id: int,
     ssl_data: dict,
+    commit: bool = True,
 ) -> int:
     """Insert an SSL details row and return its id."""
     cursor = await db.execute(
@@ -271,7 +275,8 @@ async def save_ssl_details(
             ssl_data.get("error_message"),
         ),
     )
-    await db.commit()
+    if commit:
+        await db.commit()
     return cursor.lastrowid  # type: ignore[return-value]
 
 

@@ -145,7 +145,7 @@ def generate_diagnostic_screenshot(
         ("Diagnostic State:", f"{status}"),
         ("HTTP Response Code:", f"{http_code if http_code is not None else 'None (Connection not established)'}"),
         ("Measured Latency:", f"{latency:.1f} ms" if latency is not None else "Timeout / No Response"),
-        ("Error Classification:", error_msg if error_msg else "Host unreachable or server error response received"),
+        ("Error Classification:", error_msg if error_msg else ("Host reachable & online" if status == "ONLINE" else "Host unreachable or server error response received")),
     ]
 
     for label, val in metrics:
@@ -256,30 +256,28 @@ def _sync_capture_worker(
                     except Exception:
                         pass
 
-                    # Resilient navigation: try DOM content first, fallback to commit, then HTTP
+                    # Resilient navigation: ensure protocol, commit fast, then hydrate DOM
                     navigated = False
-                    for wait_mode in ["domcontentloaded", "commit", "load"]:
-                        try:
-                            page.goto(url, wait_until=wait_mode, timeout=12000)
-                            navigated = True
-                            break
-                        except Exception:
-                            continue
-
-                    # If https failed completely, attempt http fallback
-                    if not navigated and url.startswith("https://"):
-                        http_url = url.replace("https://", "http://", 1)
-                        for wait_mode in ["domcontentloaded", "commit"]:
+                    target_url = url if "://" in url else f"https://{url}"
+                    try:
+                        page.goto(target_url, wait_until="commit", timeout=15000)
+                        navigated = True
+                    except Exception:
+                        if target_url.startswith("https://"):
                             try:
-                                page.goto(http_url, wait_until=wait_mode, timeout=10000)
+                                http_url = target_url.replace("https://", "http://", 1)
+                                page.goto(http_url, wait_until="commit", timeout=10000)
                                 navigated = True
-                                break
                             except Exception:
-                                continue
+                                pass
 
                     if navigated:
                         try:
-                            page.wait_for_timeout(600)
+                            page.wait_for_load_state("domcontentloaded", timeout=4000)
+                        except Exception:
+                            pass
+                        try:
+                            page.wait_for_timeout(500)
                         except Exception:
                             pass
                         page.screenshot(path=abs_path, full_page=False, type="png")

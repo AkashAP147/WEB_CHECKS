@@ -173,13 +173,13 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         _ssl_memory_cache: Dict[str, dict | None] = {}
 
         # Concurrency control:
-        # 1. URL network worker concurrency: 60 on Windows (200 on Colab)
-        default_concurrency = 60 if sys.platform == "win32" else 200
+        # 1. URL network worker concurrency: 40 on Windows (60 on Linux/Colab)
+        default_concurrency = 40 if sys.platform == "win32" else 60
         concurrency_limit = min(settings.max_concurrent_scans, default_concurrency)
         url_semaphore = asyncio.Semaphore(concurrency_limit)
 
-        # 2. Screenshot concurrency: 8 on Windows (15 on Colab)
-        screenshot_limit = 8 if sys.platform == "win32" else getattr(settings, "max_concurrent_screenshots", 15)
+        # 2. Screenshot concurrency: 4 to prevent CPU starvation on 2-vCPU Colab & Windows
+        screenshot_limit = 4
         screenshot_semaphore = asyncio.Semaphore(screenshot_limit)
 
         # -----------------------------------------------------------------------
@@ -187,7 +187,6 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         # -----------------------------------------------------------------------
         async def db_batch_writer():
             nonlocal completed
-            last_progress_update = 0
             stop_requested = False
             while not stop_requested:
                 item = await db_queue.get()
@@ -210,17 +209,17 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                 try:
                     async with get_db() as db:
                         for h_res, d_recs, s_dat in batch:
-                            res_id = await save_scan_result(db, scan_id=scan_id, result_data=h_res)
+                            res_id = await save_scan_result(db, scan_id=scan_id, result_data=h_res, commit=False)
                             if d_recs:
-                                await save_dns_records(db, scan_result_id=res_id, records_list=d_recs)
+                                await save_dns_records(db, scan_result_id=res_id, records_list=d_recs, commit=False)
                             if s_dat:
-                                await save_ssl_details(db, scan_result_id=res_id, ssl_data=s_dat)
+                                await save_ssl_details(db, scan_result_id=res_id, ssl_data=s_dat, commit=False)
                             completed += 1
 
-                        # Update scan progress every 25 completions or when done
-                        if completed - last_progress_update >= 25 or completed == total:
-                            await update_scan_status(db, scan_id, "running", completed_urls=completed)
-                            last_progress_update = completed
+                        # Single fast atomic commit for all 50 items in the batch
+                        await db.commit()
+                        # Immediate scan progress update on every batch write
+                        await update_scan_status(db, scan_id, "running", completed_urls=completed)
                 except Exception as write_err:
                     logger.error("DB batch write error: %s", write_err)
                 finally:
@@ -329,37 +328,52 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                     except Exception:
                         return None
 
-                http_res, dns_records, ssl_data = await asyncio.gather(
-                    run_http(), run_dns(), run_ssl()
-                )
+                http_res = await run_http()
 
                 # If site redirected to another location, consider it ONLINE
                 if http_res.get("is_redirect") or (http_res.get("final_url") and http_res.get("final_url").rstrip('/') != raw_url.rstrip('/')):
                     http_res["status"] = "ONLINE"
 
-                # 4. Smart Screenshot Dispatch with bounded timeout
-                screenshot_path = None
-                target_to_capture = http_res.get("final_url") or raw_url
                 status = http_res.get("status")
+                target_to_capture = http_res.get("final_url") or raw_url
 
-                if status == "ONLINE":
+                # Short-circuit offline/error/timeout sites:
+                # Instant diagnostic card generated via thread, skipping heavy DNS/SSL/Chromium overhead
+                if status != "ONLINE":
                     try:
-                        async with screenshot_semaphore:
-                            ss_res = await asyncio.wait_for(
-                                screenshot_capturer.capture(
-                                    target_to_capture,
-                                    scan_id,
-                                    status_info=http_res,
-                                ),
-                                timeout=25.0,
-                            )
-                        if ss_res.get("success"):
-                            screenshot_path = ss_res.get("screenshot_path")
-                    except Exception as ss_err:
-                        logger.debug("Screenshot error for %s: %s", raw_url, ss_err)
+                        filename = _build_filename(scan_id, target_to_capture)
+                        abs_path = os.path.join(settings.screenshots_dir, filename)
+                        created = await asyncio.to_thread(
+                            generate_diagnostic_screenshot, abs_path, target_to_capture, http_res
+                        )
+                        if created:
+                            http_res["screenshot_path"] = f"screenshots/{filename}"
+                    except Exception:
+                        pass
+                    await db_queue.put((http_res, [], None))
+                    return
 
-                # Fast diagnostic snapshot for offline/error/timeout sites
-                # (Offloaded via asyncio.to_thread so Pillow/disk I/O never blocks event loop)
+                # For ONLINE sites: run DNS and SSL concurrently
+                dns_records, ssl_data = await asyncio.gather(run_dns(), run_ssl())
+
+                # Smart Screenshot Dispatch with bounded timeout
+                screenshot_path = None
+                try:
+                    async with screenshot_semaphore:
+                        ss_res = await asyncio.wait_for(
+                            screenshot_capturer.capture(
+                                target_to_capture,
+                                scan_id,
+                                status_info=http_res,
+                            ),
+                            timeout=25.0,
+                        )
+                    if ss_res.get("success"):
+                        screenshot_path = ss_res.get("screenshot_path")
+                except Exception as ss_err:
+                    logger.debug("Screenshot error for %s: %s", raw_url, ss_err)
+
+                # Fallback diagnostic snapshot if browser screenshot failed
                 if not screenshot_path:
                     try:
                         filename = _build_filename(scan_id, target_to_capture)
