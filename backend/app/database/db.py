@@ -97,6 +97,9 @@ CREATE TABLE IF NOT EXISTS ssl_details (
 # Optional indices for common queries
 _CREATE_INDICES = """
 CREATE INDEX IF NOT EXISTS idx_scan_results_scan_id    ON scan_results(scan_id);
+CREATE INDEX IF NOT EXISTS idx_scan_results_created_at ON scan_results(created_at);
+CREATE INDEX IF NOT EXISTS idx_scan_results_orig_url   ON scan_results(original_url);
+CREATE INDEX IF NOT EXISTS idx_scan_results_domain     ON scan_results(domain);
 CREATE INDEX IF NOT EXISTS idx_dns_records_result_id   ON dns_records(scan_result_id);
 CREATE INDEX IF NOT EXISTS idx_ssl_details_result_id   ON ssl_details(scan_result_id);
 CREATE INDEX IF NOT EXISTS idx_scans_created_at        ON scans(created_at);
