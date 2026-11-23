@@ -226,10 +226,10 @@ class HttpScanner:
 
         # Classify HTTP status code.
         code = response.status_code
-        if 200 <= code < 300:
+        if 200 <= code < 400:
             result["status"] = STATUS_ONLINE
-        elif 300 <= code < 400:
-            # Redirect that wasn't followed further — still counts as online.
+        elif redirect_chain or result.get("is_redirect"):
+            # Any target that successfully redirected to another location is considered ONLINE
             result["status"] = STATUS_ONLINE
         elif code in (403, 404, 451):
             result["status"] = STATUS_HTTP_ERROR

@@ -123,8 +123,8 @@ class ExcelReportGenerator:
         ws.views.sheetView[0].showGridLines = True
 
         headers = [
-            "Original URL",
-            "Final URL",
+            "Original Target URL",
+            "Final / Redirect URL",
             "Domain",
             "Status",
             "HTTP Status Code",

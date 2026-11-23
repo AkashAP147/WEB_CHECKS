@@ -323,6 +323,8 @@ class PDFReportGenerator:
 
         for r in results:
             domain = r.get("domain") or r.get("original_url", "")
+            orig_url = r.get("original_url", "")
+            final_url = r.get("final_url") or orig_url
             status = r.get("status", "UNKNOWN")
             http_code = str(r.get("http_status_code") or "—")
             rt = f"{r.get('response_time_ms'):.0f}ms" if r.get("response_time_ms") else "—"
@@ -335,8 +337,14 @@ class PDFReportGenerator:
             ssl_cell = Paragraph("<font color='#16a34a'>PASS</font>" if status not in ("SSL_ERROR", "OFFLINE") else "<font color='#dc2626'>ISSUE</font>", self.body_style)
             dns_cell = Paragraph("<font color='#16a34a'>RESOLVED</font>" if status != "DNS_ERROR" else "<font color='#dc2626'>FAILED</font>", self.body_style)
 
+            # Show redirect URL if different from target
+            if final_url and orig_url and final_url.rstrip('/') != orig_url.rstrip('/'):
+                domain_para = Paragraph(f"<font size='8'><b>{domain}</b><br/><font color='#2563eb'>&rarr; {final_url[:40]}</font></font>", self.body_style)
+            else:
+                domain_para = Paragraph(f"<font size='8.5'>{domain}</font>", self.body_style)
+
             table_rows.append([
-                Paragraph(f"<font size='8.5'>{domain}</font>", self.body_style),
+                domain_para,
                 status_cell,
                 Paragraph(http_code, self.body_style),
                 Paragraph(rt, self.body_style),
@@ -392,9 +400,12 @@ class PDFReportGenerator:
             website_elements.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#cbd5e1"), spaceBefore=2, spaceAfter=10))
 
             # Details Key-Value Table
+            is_redirected = final_url and orig_url and final_url.rstrip('/') != orig_url.rstrip('/')
+            final_url_para = Paragraph(f"<font color='#2563eb'><b>{final_url}</b> [Redirected]</font>", self.code_style) if is_redirected else Paragraph(final_url, self.code_style)
+
             site_details = [
                 [Paragraph("<b>Original Target:</b>", self.body_style), Paragraph(orig_url, self.code_style)],
-                [Paragraph("<b>Final URL:</b>", self.body_style), Paragraph(final_url, self.code_style)],
+                [Paragraph("<b>Final URL:</b>", self.body_style), final_url_para],
                 [Paragraph("<b>HTTP Status:</b>", self.body_style), Paragraph(http_code, self.body_style)],
                 [Paragraph("<b>Response Time:</b>", self.body_style), Paragraph(resp_time, self.body_style)],
                 [Paragraph("<b>Page Title:</b>", self.body_style), Paragraph(title, self.body_style)],

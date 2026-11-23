@@ -321,6 +321,10 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                     run_http(), run_dns(), run_ssl()
                 )
 
+                # If site redirected to another location, consider it ONLINE
+                if http_res.get("is_redirect") or (http_res.get("final_url") and http_res.get("final_url").rstrip('/') != raw_url.rstrip('/')):
+                    http_res["status"] = "ONLINE"
+
                 # 4. Smart Screenshot Dispatch with bounded timeout
                 screenshot_path = None
                 target_to_capture = http_res.get("final_url") or raw_url
@@ -335,7 +339,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                                     scan_id,
                                     status_info=http_res,
                                 ),
-                                timeout=20.0,
+                                timeout=25.0,
                             )
                         if ss_res.get("success"):
                             screenshot_path = ss_res.get("screenshot_path")
@@ -963,7 +967,7 @@ async def download_csv_report(scan_id: str):
             "HTTP Status Code",
             "Response Time (ms)",
             "Original Target URL",
-            "Final URL",
+            "Final / Redirect URL",
             "Web Server",
             "Website Title",
             "SSL Certificate Status",

@@ -186,7 +186,7 @@ def _sync_capture_worker(
     url: str,
     abs_path: str,
     viewport: dict,
-    timeout_ms: int = 15000,
+    timeout_ms: int = 20000,
     status_info: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Worker function executed inside a thread using sync_playwright.
@@ -205,7 +205,15 @@ def _sync_capture_worker(
     if PLAYWRIGHT_AVAILABLE:
         try:
             with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--disable-gpu",
+                        "--disable-dev-shm-usage",
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                    ],
+                )
                 try:
                     context = browser.new_context(
                         viewport=viewport,
@@ -219,30 +227,34 @@ def _sync_capture_worker(
                     page = context.new_page()
                     page.set_default_navigation_timeout(timeout_ms)
 
-                    # Fast DOM navigation (optimized 5s timeout)
+                    # Robust navigation: wait for 'commit' so slow trackers/assets don't block screenshot
                     try:
-                        page.goto(url, wait_until="domcontentloaded", timeout=min(timeout_ms, 5000))
-                    except Exception:
+                        page.goto(url, wait_until="commit", timeout=timeout_ms)
                         try:
-                            page.goto(url, wait_until="commit", timeout=3000)
+                            page.wait_for_load_state("domcontentloaded", timeout=min(timeout_ms, 10000))
                         except Exception:
                             pass
-
-                    try:
-                        page.wait_for_timeout(200)
-                    except Exception:
-                        pass
-
-                    page.screenshot(path=abs_path, full_page=True, type="png")
-                    if os.path.exists(abs_path) and os.path.getsize(abs_path) > 1000:
-                        browser_captured = True
+                        page.wait_for_timeout(1000)
+                        page.screenshot(path=abs_path, full_page=False, type="png")
+                        if os.path.exists(abs_path) and os.path.getsize(abs_path) > 1000:
+                            browser_captured = True
+                    except Exception as nav_err:
+                        try:
+                            # Secondary attempt with wait_until='load'
+                            page.goto(url, wait_until="load", timeout=timeout_ms)
+                            page.wait_for_timeout(500)
+                            page.screenshot(path=abs_path, full_page=False, type="png")
+                            if os.path.exists(abs_path) and os.path.getsize(abs_path) > 1000:
+                                browser_captured = True
+                        except Exception:
+                            pass
                 finally:
                     try:
                         browser.close()
                     except Exception:
                         pass
         except Exception as exc:
-            logger.debug("Playwright browser navigation failed for %s (%s). Using diagnostic screenshot.", url, exc)
+            logger.warning("Playwright browser navigation failed for %s (%s). Using diagnostic screenshot.", url, exc)
 
     # Fallback to diagnostic mockup image if browser capture didn't produce a valid file
     if not browser_captured or not os.path.exists(abs_path) or os.path.getsize(abs_path) == 0:
@@ -257,7 +269,7 @@ class ScreenshotCapture:
     """
 
     DEFAULT_VIEWPORT = {"width": 1440, "height": 900}
-    DEFAULT_NAV_TIMEOUT_MS = 7_000
+    DEFAULT_NAV_TIMEOUT_MS = 20_000
 
     def __init__(self, screenshots_dir: str | None = None) -> None:
         self.screenshots_dir = screenshots_dir or settings.screenshots_dir
