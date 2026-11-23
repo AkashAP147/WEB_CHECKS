@@ -36,7 +36,7 @@ class SSLChecker:
         result = await checker.check("example.com")
     """
 
-    DEFAULT_TIMEOUT: float = 10.0  # seconds
+    DEFAULT_TIMEOUT: float = 3.5  # seconds (fast fail for parallel scans)
 
     # ------------------------------------------------------------------
     # Public API

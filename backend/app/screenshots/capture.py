@@ -219,17 +219,17 @@ def _sync_capture_worker(
                     page = context.new_page()
                     page.set_default_navigation_timeout(timeout_ms)
 
-                    # Fast DOM navigation
+                    # Fast DOM navigation (optimized 5s timeout)
                     try:
-                        page.goto(url, wait_until="domcontentloaded", timeout=min(timeout_ms, 10000))
+                        page.goto(url, wait_until="domcontentloaded", timeout=min(timeout_ms, 5000))
                     except Exception:
                         try:
-                            page.goto(url, wait_until="commit", timeout=5000)
+                            page.goto(url, wait_until="commit", timeout=3000)
                         except Exception:
                             pass
 
                     try:
-                        page.wait_for_timeout(400)
+                        page.wait_for_timeout(200)
                     except Exception:
                         pass
 
@@ -257,7 +257,7 @@ class ScreenshotCapture:
     """
 
     DEFAULT_VIEWPORT = {"width": 1440, "height": 900}
-    DEFAULT_NAV_TIMEOUT_MS = 15_000
+    DEFAULT_NAV_TIMEOUT_MS = 7_000
 
     def __init__(self, screenshots_dir: str | None = None) -> None:
         self.screenshots_dir = screenshots_dir or settings.screenshots_dir

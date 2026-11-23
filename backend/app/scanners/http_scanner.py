@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import re
 import time
+import asyncio
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
@@ -33,10 +34,10 @@ STATUS_BLOCKED = "BLOCKED"
 STATUS_SSRF_BLOCKED = "SSRF_BLOCKED"
 
 # Max redirects we are willing to follow manually.
-MAX_REDIRECTS = 10
+MAX_REDIRECTS = 5
 
-# Default request timeout in seconds.
-DEFAULT_TIMEOUT = 30.0
+# Default request timeout in seconds (optimized for fast parallel scanning).
+DEFAULT_TIMEOUT = 7.0
 
 # Regex to pull <title> from an HTML document.
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
@@ -45,7 +46,7 @@ _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Safari/537.36 "
+    "Chrome/122.0.0.0 Safari/537.36 "
     "WebPulse/1.0"
 )
 
@@ -61,14 +62,14 @@ class HttpScanner:
     Parameters
     ----------
     timeout:
-        Per-request timeout in seconds (default 30).
+        Per-request timeout in seconds (default 7.0).
     """
 
     timeout: float = DEFAULT_TIMEOUT
 
     # ----- public API -------------------------------------------------------
 
-    async def scan_url(self, url: str) -> dict[str, Any]:
+    async def scan_url(self, url: str, client: Optional[httpx.AsyncClient] = None) -> dict[str, Any]:
         """Scan a single URL and return a comprehensive result dict.
 
         The result always contains the following keys:
@@ -109,8 +110,8 @@ class HttpScanner:
             result["error_message"] = f"Invalid URL: {exc}"
             return result
 
-        # -- SSRF pre-flight -------------------------------------------------
-        is_safe, block_reason = resolve_and_check(url)
+        # -- SSRF pre-flight (non-blocking in thread pool) -------------------
+        is_safe, block_reason = await asyncio.to_thread(resolve_and_check, url)
         if not is_safe:
             if block_reason == "DNS_ERROR":
                 result["status"] = STATUS_DNS_ERROR
@@ -126,42 +127,48 @@ class HttpScanner:
         response: httpx.Response | None = None
         start = time.monotonic()
 
-        try:
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(self.timeout),
-                follow_redirects=False,       # we follow manually
-                verify=True,
-                headers={"User-Agent": _USER_AGENT},
-            ) as client:
-                for _ in range(MAX_REDIRECTS + 1):
-                    response = await client.get(current_url)
+        async def _execute_with_client(http_client: httpx.AsyncClient):
+            nonlocal response, current_url
+            for _ in range(MAX_REDIRECTS + 1):
+                response = await http_client.get(current_url)
 
-                    if response.is_redirect:
-                        redirect_location = response.headers.get("location")
-                        if not redirect_location:
-                            break
-
-                        # Resolve relative redirects.
-                        redirect_location = str(
-                            response.url.join(redirect_location)
-                        )
-
-                        # SSRF check on redirect target.
-                        if not validate_redirect_target(redirect_location):
-                            elapsed = (time.monotonic() - start) * 1000
-                            result["response_time_ms"] = round(elapsed, 2)
-                            result["status"] = STATUS_SSRF_BLOCKED
-                            result["error_message"] = (
-                                f"Redirect target blocked (SSRF): {redirect_location}"
-                            )
-                            result["redirect_chain"] = redirect_chain
-                            result["is_redirect"] = bool(redirect_chain)
-                            return result
-
-                        redirect_chain.append(current_url)
-                        current_url = redirect_location
-                    else:
+                if response.is_redirect:
+                    redirect_location = response.headers.get("location")
+                    if not redirect_location:
                         break
+
+                    # Resolve relative redirects.
+                    redirect_location = str(response.url.join(redirect_location))
+
+                    # SSRF check on redirect target.
+                    if not validate_redirect_target(redirect_location):
+                        elapsed = (time.monotonic() - start) * 1000
+                        result["response_time_ms"] = round(elapsed, 2)
+                        result["status"] = STATUS_SSRF_BLOCKED
+                        result["error_message"] = f"Redirect target blocked (SSRF): {redirect_location}"
+                        result["redirect_chain"] = redirect_chain
+                        result["is_redirect"] = bool(redirect_chain)
+                        return False
+
+                    redirect_chain.append(current_url)
+                    current_url = redirect_location
+                else:
+                    break
+            return True
+
+        try:
+            if client is not None:
+                if not await _execute_with_client(client):
+                    return result
+            else:
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(self.timeout),
+                    follow_redirects=False,
+                    verify=True,
+                    headers={"User-Agent": _USER_AGENT},
+                ) as local_client:
+                    if not await _execute_with_client(local_client):
+                        return result
 
             elapsed = (time.monotonic() - start) * 1000
 

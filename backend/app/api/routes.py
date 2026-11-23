@@ -49,7 +49,11 @@ from backend.app.utils.url_validator import validate_url, is_safe_url, validate_
 from backend.app.scanners.http_scanner import HttpScanner
 from backend.app.dns.analyzer import DNSAnalyzer
 from backend.app.ssl_mod.checker import SSLChecker
-from backend.app.screenshots.capture import ScreenshotCapture
+from backend.app.screenshots.capture import (
+    ScreenshotCapture,
+    generate_diagnostic_screenshot,
+    _build_filename,
+)
 
 # Optional heavyweight imports – degrade gracefully when unavailable
 try:
@@ -104,7 +108,15 @@ def _extract_urls_from_excel(file_bytes: bytes, filename: str = "") -> List[str]
 
 
 async def _run_scan(scan_id: str, urls: List[str]) -> None:
-    """Background coroutine that executes a full multi-check scan for all URLs in parallel."""
+    """High-throughput asynchronous scan engine.
+
+    Architecture:
+    - Shared persistent HTTPX connection pool (up to 500 keep-alive connections).
+    - Producer-Consumer asynchronous DB batch queue: workers never wait on SQLite locks.
+    - Smart screenshot dispatch: live Chromium for ONLINE sites; instantaneous 0-overhead
+      diagnostic cards for offline/error sites.
+    - Non-blocking parallel workers with dual concurrency semaphores.
+    """
     http_scanner = HttpScanner()
     dns_analyzer = DNSAnalyzer()
     ssl_checker = SSLChecker()
@@ -112,21 +124,71 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
 
     completed = 0
     total = len(urls)
-    progress_lock = asyncio.Lock()
 
     async with get_db() as db:
         await update_scan_status(db, scan_id, "running", completed_urls=0)
 
-    # Dual concurrency control:
-    # 1. URL concurrency: process up to 300 websites simultaneously for network checks (HTTP, DNS, SSL)
+    # Concurrency control:
+    # 1. URL network worker concurrency: up to 300 simultaneous checks
     concurrency_limit = min(settings.max_concurrent_scans, 300)
     url_semaphore = asyncio.Semaphore(concurrency_limit)
-    # 2. Screenshot concurrency: throttle Playwright Chromium instances (up to 20) to preserve RAM & CPU
-    screenshot_limit = getattr(settings, "max_concurrent_screenshots", 20)
+
+    # 2. Screenshot concurrency: throttle Chromium to 6 on PC (15 on Colab) to preserve CPU
+    screenshot_limit = 6 if sys.platform == "win32" else getattr(settings, "max_concurrent_screenshots", 15)
     screenshot_semaphore = asyncio.Semaphore(screenshot_limit)
 
-    async def scan_single_url(raw_url: str):
+    # -----------------------------------------------------------------------
+    # Producer-Consumer DB Batch Writer
+    # -----------------------------------------------------------------------
+    db_queue: asyncio.Queue = asyncio.Queue(maxsize=4000)
+
+    async def db_batch_writer():
         nonlocal completed
+        last_progress_update = 0
+        while True:
+            item = await db_queue.get()
+            if item is None:
+                db_queue.task_done()
+                break
+
+            batch = [item]
+            # Accumulate up to 49 more items from queue without blocking
+            while len(batch) < 50:
+                try:
+                    extra = db_queue.get_nowait()
+                    if extra is None:
+                        db_queue.put_nowait(None)
+                        break
+                    batch.append(extra)
+                except asyncio.QueueEmpty:
+                    break
+
+            try:
+                async with get_db() as db:
+                    for h_res, d_recs, s_dat in batch:
+                        res_id = await save_scan_result(db, scan_id=scan_id, result_data=h_res)
+                        if d_recs:
+                            await save_dns_records(db, scan_result_id=res_id, records_list=d_recs)
+                        if s_dat:
+                            await save_ssl_details(db, scan_result_id=res_id, ssl_data=s_dat)
+                        completed += 1
+
+                    # Update scan progress every 10 completions or when done
+                    if completed - last_progress_update >= 10 or completed == total:
+                        await update_scan_status(db, scan_id, "running", completed_urls=completed)
+                        last_progress_update = completed
+            except Exception as write_err:
+                logger.error("DB batch write error: %s", write_err)
+            finally:
+                for _ in batch:
+                    db_queue.task_done()
+
+    writer_task = asyncio.create_task(db_batch_writer())
+
+    # -----------------------------------------------------------------------
+    # Worker Coroutine
+    # -----------------------------------------------------------------------
+    async def scan_single_url(raw_url: str, client: httpx.AsyncClient):
         if scan_id not in _running_tasks:
             return
 
@@ -134,17 +196,16 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
             if scan_id not in _running_tasks:
                 return
 
-            # Extract tentative domain for parallel DNS & SSL lookups
             try:
                 parsed = urlparse(raw_url if "://" in raw_url else f"https://{raw_url}")
                 tentative_domain = (parsed.netloc or parsed.path).split(":")[0].split("/")[0]
             except Exception:
                 tentative_domain = raw_url.replace("https://", "").replace("http://", "").split("/")[0]
 
-            # 1, 2, 3: Run HTTP Scan, DNS Analysis, and SSL Check concurrently in parallel!
+            # 1, 2, 3: Run HTTP, DNS, and SSL in parallel with shared client
             async def run_http():
                 try:
-                    return await http_scanner.scan_url(raw_url)
+                    return await http_scanner.scan_url(raw_url, client=client)
                 except Exception as exc:
                     return {
                         "original_url": raw_url,
@@ -176,45 +237,65 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                 run_http(), run_dns(), run_ssl()
             )
 
-            domain = http_res.get("domain") or tentative_domain
-
-            # 4. Universal Screenshot Capture (protected by screenshot semaphore)
-            # Guarantees a visual snapshot for EVERY website (online, HTTP errors, offline, DNS/SSL errors)
+            # 4. Smart Screenshot Dispatch
             screenshot_path = None
-            try:
-                target_to_capture = http_res.get("final_url") or raw_url
-                async with screenshot_semaphore:
-                    ss_res = await screenshot_capturer.capture(
-                        target_to_capture,
-                        scan_id,
-                        status_info=http_res,
-                    )
-                if ss_res.get("success"):
-                    screenshot_path = ss_res.get("screenshot_path")
-            except Exception as ss_err:
-                logger.error("Screenshot error for %s: %s", raw_url, ss_err)
+            target_to_capture = http_res.get("final_url") or raw_url
+            status = http_res.get("status")
+
+            if status == "ONLINE":
+                try:
+                    async with screenshot_semaphore:
+                        ss_res = await screenshot_capturer.capture(
+                            target_to_capture,
+                            scan_id,
+                            status_info=http_res,
+                        )
+                    if ss_res.get("success"):
+                        screenshot_path = ss_res.get("screenshot_path")
+                except Exception as ss_err:
+                    logger.debug("Screenshot error for %s: %s", raw_url, ss_err)
+
+            # Fast diagnostic snapshot for offline/error/timeout sites (instant, 0% CPU)
+            if not screenshot_path:
+                try:
+                    filename = _build_filename(scan_id, target_to_capture)
+                    abs_path = os.path.join(settings.screenshots_dir, filename)
+                    if generate_diagnostic_screenshot(abs_path, target_to_capture, http_res):
+                        screenshot_path = f"screenshots/{filename}"
+                except Exception:
+                    pass
 
             http_res["screenshot_path"] = screenshot_path
 
-            # Save result and sub-records to SQLite (thread-safe async db session)
-            async with progress_lock:
-                completed += 1
-                async with get_db() as db:
-                    result_id = await save_scan_result(db, scan_id=scan_id, result_data=http_res)
-                    if dns_records:
-                        await save_dns_records(db, scan_result_id=result_id, records_list=dns_records)
-                    if ssl_data:
-                        await save_ssl_details(db, scan_result_id=result_id, ssl_data=ssl_data)
+            # Push to DB batch queue (non-blocking instant hand-off)
+            await db_queue.put((http_res, dns_records, ssl_data))
 
-                    # Update scan progress every 3 URLs or when fully completed
-                    if completed % 3 == 0 or completed == total:
-                        await update_scan_status(db, scan_id, "running", completed_urls=completed)
-
+    # -----------------------------------------------------------------------
+    # Main Scan Execution Loop with Shared Persistent HTTP Client
+    # -----------------------------------------------------------------------
     try:
-        # Run all URLs concurrently governed by the semaphore
-        await asyncio.gather(*[scan_single_url(u) for u in urls])
+        limits = httpx.Limits(max_connections=600, max_keepalive_connections=200)
+        async with httpx.AsyncClient(
+            limits=limits,
+            timeout=httpx.Timeout(connect=5.0, read=5.0, write=5.0, pool=8.0),
+            follow_redirects=False,
+            verify=True,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/122.0.0.0 Safari/537.36 WebPulse/1.0"
+                )
+            },
+        ) as shared_client:
+            # Launch all URL workers concurrently
+            await asyncio.gather(*[scan_single_url(u, shared_client) for u in urls])
 
-        # Mark completed unless marked cancelled
+        # Signal DB writer that all scanning is complete and wait for final flush
+        await db_queue.put(None)
+        await writer_task
+
+        # Mark scan completed in database
         async with get_db() as db:
             scan_row = await get_scan(db, scan_id)
             if scan_row and scan_row.get("status") == "cancelled":
@@ -223,10 +304,14 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                 await update_scan_status(db, scan_id, "completed", completed_urls=completed)
 
     except asyncio.CancelledError:
+        await db_queue.put(None)
+        await writer_task
         async with get_db() as db:
             await update_scan_status(db, scan_id, "cancelled", completed_urls=completed)
     except Exception as exc:
         logger.error("Scan %s failed: %s", scan_id, exc, exc_info=True)
+        await db_queue.put(None)
+        await writer_task
         async with get_db() as db:
             await update_scan_status(db, scan_id, "failed", completed_urls=completed)
     finally:

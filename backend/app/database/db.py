@@ -123,7 +123,7 @@ async def init_db(db_path: str | None = None) -> None:
 
 @asynccontextmanager
 async def get_db(db_path: str | None = None):
-    """Async context manager that yields an aiosqlite connection.
+    """Async context manager that yields an optimized aiosqlite connection.
 
     Usage::
 
@@ -131,8 +131,12 @@ async def get_db(db_path: str | None = None):
             await db.execute(...)
     """
     path = _clean_path(db_path) if db_path else DATABASE_URL
-    db = await aiosqlite.connect(path)
+    db = await aiosqlite.connect(path, timeout=30.0)
     try:
+        await db.execute("PRAGMA journal_mode=WAL;")
+        await db.execute("PRAGMA synchronous=NORMAL;")
+        await db.execute("PRAGMA cache_size=10000;")
+        await db.execute("PRAGMA busy_timeout=15000;")
         await db.execute("PRAGMA foreign_keys=ON;")
         db.row_factory = aiosqlite.Row  # allow dict-like access on rows
         yield db

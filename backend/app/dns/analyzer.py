@@ -71,9 +71,9 @@ class DNSAnalyzer:
         result = await analyzer.analyze("example.com")
     """
 
-    # Default per-query timeout and lifetime (seconds).
-    DEFAULT_TIMEOUT: float = 5.0
-    DEFAULT_LIFETIME: float = 10.0
+    # Default per-query timeout and lifetime (seconds optimized for fast parallel batches).
+    DEFAULT_TIMEOUT: float = 2.0
+    DEFAULT_LIFETIME: float = 4.0
 
     def __init__(
         self,
