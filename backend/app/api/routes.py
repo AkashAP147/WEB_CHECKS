@@ -890,8 +890,9 @@ async def download_pdf_report(
     scan_id: str,
     refresh: bool = Query(False),
     batch: Optional[int] = Query(None),
-    batch_size: int = Query(100),
+    batch_size: int = Query(50),
     status: Optional[str] = Query(None, description="Filter: ALL, ONLINE, OFFLINE, ERRORS"),
+    mode: Optional[str] = Query(None, description="Mode: summary, visual, issues"),
 ):
     if PDFReportGenerator is None:
         raise HTTPException(status_code=501, detail="PDF report generation is not available.")
@@ -902,6 +903,10 @@ async def download_pdf_report(
         if scan is None:
             raise HTTPException(status_code=404, detail="Scan not found.")
         results = await get_scan_results(db, scan_id)
+
+    # Filter by mode if issues requested
+    if mode == "issues" and not status:
+        status = "ERRORS"
 
     # Filter by status if requested
     filtered_results = results
@@ -916,7 +921,7 @@ async def download_pdf_report(
         elif sf in ("ERRORS", "ERROR", "WARNINGS"):
             filtered_results = [r for r in results if str(r.get("status") or "").upper() not in ("ONLINE", "OFFLINE")]
 
-    # Support batched PDF slices for large target lists (e.g. 100 targets per batch)
+    # Support batched PDF slices for large target lists (e.g. 50 targets per batch)
     batch_suffix = ""
     if batch is not None and batch > 0:
         start_idx = (batch - 1) * batch_size
@@ -926,12 +931,19 @@ async def download_pdf_report(
     else:
         batch_results = filtered_results
 
-    filename = f"WebPulse_Audit_{scan_id[:8]}{status_suffix}{batch_suffix}.pdf"
+    mode_suffix = f"_{mode}" if mode else ""
+    filename = f"WebPulse_Audit_{scan_id[:8]}{status_suffix}{mode_suffix}{batch_suffix}.pdf"
     filepath = os.path.join(settings.reports_dir, filename)
 
     # Always generate or regenerate when requested, filtered, or if missing
     generator = PDFReportGenerator()
-    await generator.generate(scan=scan, results=batch_results, output_path=filepath, status_filter=status)
+    await generator.generate(
+        scan=scan,
+        results=batch_results,
+        output_path=filepath,
+        status_filter=status,
+        report_mode=mode,
+    )
 
     return FileResponse(
         filepath,

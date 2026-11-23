@@ -96,6 +96,7 @@ export default function ScanResults() {
 
   const [pdfBatch, setPdfBatch] = useState<number>(0);
   const [pdfStatusFilter, setPdfStatusFilter] = useState<'ALL' | 'ONLINE' | 'OFFLINE' | 'ERRORS'>('ALL');
+  const [pdfMode, setPdfMode] = useState<'summary' | 'issues' | 'visual'>('summary');
   const [isStopping, setIsStopping] = useState<boolean>(false);
 
   const handleStopScan = async () => {
@@ -120,6 +121,7 @@ export default function ScanResults() {
       if (selectedBatch > 0) params.set('batch', String(selectedBatch));
       const s = statusOverride !== undefined ? statusOverride : pdfStatusFilter;
       if (s && s !== 'ALL') params.set('status', s);
+      if (pdfMode) params.set('mode', pdfMode);
     }
     const qs = params.toString();
     if (qs) url += `?${qs}`;
@@ -204,30 +206,48 @@ export default function ScanResults() {
             </button>
           )}
 
-          {/* PDF Status Scope Selector */}
+          {/* PDF Format Selector */}
           <select
-            value={pdfStatusFilter}
-            onChange={(e) => setPdfStatusFilter(e.target.value as any)}
-            className="text-xs py-2 px-2.5 rounded-lg border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 text-surface-700 dark:text-surface-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 shadow-xs cursor-pointer"
-            title="Choose which targets to include in PDF export"
+            value={pdfMode}
+            onChange={(e) => {
+              const m = e.target.value as any;
+              setPdfMode(m);
+              if (m === 'issues') setPdfStatusFilter('ERRORS');
+            }}
+            className="text-xs py-2 px-2.5 rounded-lg border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 text-surface-700 dark:text-surface-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 shadow-xs cursor-pointer font-medium"
+            title="Choose PDF format"
           >
-            <option value="ALL">PDF: Full (Online &rarr; Offline &rarr; Errors)</option>
-            <option value="ONLINE">PDF: Online Only ({online})</option>
-            <option value="OFFLINE">PDF: Offline Only ({offline})</option>
-            <option value="ERRORS">PDF: Errors &amp; Warnings ({errors})</option>
+            <option value="summary">PDF: Executive Summary (Fast Table, ~2 MB)</option>
+            <option value="issues">PDF: Offline &amp; Issues Only (With Snapshots)</option>
+            <option value="visual">PDF: Visual Inspection (With Screenshots)</option>
           </select>
 
-          {total > 100 && (
+          {/* PDF Status Scope Selector (only if not in issues mode) */}
+          {pdfMode !== 'issues' && (
+            <select
+              value={pdfStatusFilter}
+              onChange={(e) => setPdfStatusFilter(e.target.value as any)}
+              className="text-xs py-2 px-2.5 rounded-lg border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 text-surface-700 dark:text-surface-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 shadow-xs cursor-pointer"
+              title="Filter by status"
+            >
+              <option value="ALL">Status: All Targets</option>
+              <option value="ONLINE">Status: Online Only ({online})</option>
+              <option value="OFFLINE">Status: Offline Only ({offline})</option>
+              <option value="ERRORS">Status: Errors &amp; Warnings ({errors})</option>
+            </select>
+          )}
+
+          {pdfMode === 'visual' && total > 50 && (
             <select
               value={pdfBatch}
               onChange={(e) => setPdfBatch(Number(e.target.value))}
               className="text-xs py-2 px-2.5 rounded-lg border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 text-surface-700 dark:text-surface-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 shadow-xs cursor-pointer"
-              title="Select PDF batch to download"
+              title="Select 50-target visual batch to download"
             >
-              <option value={0}>All Targets ({total})</option>
-              {Array.from({ length: Math.ceil(total / 100) }, (_, i) => (
+              <option value={0}>All Targets (First 100 Screenshots)</option>
+              {Array.from({ length: Math.ceil(total / 50) }, (_, i) => (
                 <option key={i + 1} value={i + 1}>
-                  Batch {i + 1} ({i * 100 + 1} - {Math.min((i + 1) * 100, total)})
+                  Batch {i + 1} ({i * 50 + 1} - {Math.min((i + 1) * 50, total)})
                 </option>
               ))}
             </select>

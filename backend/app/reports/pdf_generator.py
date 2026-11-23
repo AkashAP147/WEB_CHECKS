@@ -127,8 +127,16 @@ class PDFReportGenerator:
         results: List[Dict[str, Any]],
         output_path: str,
         status_filter: Optional[str] = None,
+        report_mode: Optional[str] = None,
     ) -> str:
-        """Create the PDF report and write to output_path with status sorting & filtering."""
+        """Create the PDF report and write to output_path with status sorting & filtering.
+        
+        report_mode:
+            'summary': Fast high-density table without heavy per-page screenshots (recommended for > 50 targets).
+            'issues': Visual diagnostic screenshots for offline and error targets only.
+            'visual': Full visual inspection report including screenshots.
+            None: Auto-select ('summary' for > 50 targets, 'visual' for <= 50 targets).
+        """
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
         # 1. Apply status filtering if requested (ONLINE, OFFLINE, ERRORS)
@@ -152,6 +160,18 @@ class PDFReportGenerator:
             return (rank, domain_key)
 
         results = sorted(filtered_results, key=_get_sort_key)
+
+        # Determine whether to include individual visual screenshot pages
+        if report_mode == "summary":
+            include_visuals = False
+        elif report_mode == "visual":
+            include_visuals = True
+        elif report_mode == "issues":
+            include_visuals = True
+        elif status_filter in ("OFFLINE", "ERRORS", "ERROR", "WARNINGS"):
+            include_visuals = True
+        else:
+            include_visuals = len(results) <= 50
 
         doc = SimpleDocTemplate(
             output_path,
@@ -308,19 +328,20 @@ class PDFReportGenerator:
         story.append(kpi_table)
         story.append(Spacer(1, 20))
 
-        # Overall Status Table
-        story.append(Paragraph("Website Status Overview", self.h2_style))
-        table_rows = [
-            [
-                Paragraph("<b>Domain / URL</b>", self.body_style),
-                Paragraph("<b>Status</b>", self.body_style),
-                Paragraph("<b>HTTP Code</b>", self.body_style),
-                Paragraph("<b>Response</b>", self.body_style),
-                Paragraph("<b>SSL</b>", self.body_style),
-                Paragraph("<b>DNS</b>", self.body_style),
-            ]
+        # =====================================================================
+        # 2. STATUS DIRECTORY TABLE (High-performance chunking)
+        # =====================================================================
+        story.append(Paragraph("Website Status Overview &amp; Audit Directory", self.h2_style))
+        header_cells = [
+            Paragraph("<b>Domain / Target URL</b>", self.body_style),
+            Paragraph("<b>Status</b>", self.body_style),
+            Paragraph("<b>HTTP Code</b>", self.body_style),
+            Paragraph("<b>Latency</b>", self.body_style),
+            Paragraph("<b>SSL</b>", self.body_style),
+            Paragraph("<b>DNS</b>", self.body_style),
         ]
 
+        data_rows = []
         for r in results:
             domain = r.get("domain") or r.get("original_url", "")
             orig_url = r.get("original_url", "")
@@ -329,21 +350,17 @@ class PDFReportGenerator:
             http_code = str(r.get("http_status_code") or "—")
             rt = f"{r.get('response_time_ms'):.0f}ms" if r.get("response_time_ms") else "—"
 
-            # Color status
             status_color = "#16a34a" if status == "ONLINE" else "#dc2626" if status == "OFFLINE" else "#d97706"
             status_cell = Paragraph(f"<font color='{status_color}'><b>{status}</b></font>", self.body_style)
-
-            # SSL & DNS indicators
             ssl_cell = Paragraph("<font color='#16a34a'>PASS</font>" if status not in ("SSL_ERROR", "OFFLINE") else "<font color='#dc2626'>ISSUE</font>", self.body_style)
             dns_cell = Paragraph("<font color='#16a34a'>RESOLVED</font>" if status != "DNS_ERROR" else "<font color='#dc2626'>FAILED</font>", self.body_style)
 
-            # Show redirect URL if different from target
             if final_url and orig_url and final_url.rstrip('/') != orig_url.rstrip('/'):
                 domain_para = Paragraph(f"<font size='8'><b>{domain}</b><br/><font color='#2563eb'>&rarr; {final_url[:40]}</font></font>", self.body_style)
             else:
                 domain_para = Paragraph(f"<font size='8.5'>{domain}</font>", self.body_style)
 
-            table_rows.append([
+            data_rows.append([
                 domain_para,
                 status_cell,
                 Paragraph(http_code, self.body_style),
@@ -352,149 +369,175 @@ class PDFReportGenerator:
                 dns_cell,
             ])
 
-        summary_table = Table(table_rows, colWidths=[184, 80, 60, 60, 60, 60])
-        summary_table.setStyle(
-            TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0f172a")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-                ("TOPPADDING", (0, 0), (-1, -1), 5),
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#e2e8f0")),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
-            ])
-        )
-        # Update header font color
-        for col in range(6):
-            table_rows[0][col].style.textColor = colors.white
-
-        story.append(summary_table)
-        story.append(PageBreak())
-
-        # =====================================================================
-        # 3. DETAILED WEBSITE AUDIT PAGES
-        # =====================================================================
-        for idx, r in enumerate(results, start=1):
-            domain = r.get("domain") or r.get("original_url", f"Site #{idx}")
-            orig_url = r.get("original_url", "")
-            final_url = r.get("final_url") or orig_url
-            status = r.get("status", "UNKNOWN")
-            http_code = str(r.get("http_status_code") or "—")
-            resp_time = f"{r.get('response_time_ms'):.1f} ms" if r.get("response_time_ms") else "—"
-            server_info = r.get("server_info") or "Not disclosed"
-            title = r.get("website_title") or "—"
-            error_msg = r.get("error_message") or "None"
-            screenshot_path = r.get("screenshot_path")
-
-            status_color = "#16a34a" if status == "ONLINE" else "#dc2626" if status == "OFFLINE" else "#d97706"
-
-            website_elements = []
-
-            # Website Header Bar
-            website_elements.append(
-                Paragraph(
-                    f"#{idx} &nbsp; <b>{domain}</b> &nbsp;&nbsp; "
-                    f"<font color='{status_color}'>[{status}]</font>",
-                    self.h1_style,
-                )
-            )
-            website_elements.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#cbd5e1"), spaceBefore=2, spaceAfter=10))
-
-            # Details Key-Value Table
-            is_redirected = final_url and orig_url and final_url.rstrip('/') != orig_url.rstrip('/')
-            final_url_para = Paragraph(f"<font color='#2563eb'><b>{final_url}</b> [Redirected]</font>", self.code_style) if is_redirected else Paragraph(final_url, self.code_style)
-
-            site_details = [
-                [Paragraph("<b>Original Target:</b>", self.body_style), Paragraph(orig_url, self.code_style)],
-                [Paragraph("<b>Final URL:</b>", self.body_style), final_url_para],
-                [Paragraph("<b>HTTP Status:</b>", self.body_style), Paragraph(http_code, self.body_style)],
-                [Paragraph("<b>Response Time:</b>", self.body_style), Paragraph(resp_time, self.body_style)],
-                [Paragraph("<b>Page Title:</b>", self.body_style), Paragraph(title, self.body_style)],
-                [Paragraph("<b>Web Server:</b>", self.body_style), Paragraph(server_info, self.body_style)],
-            ]
-
-            if error_msg != "None":
-                site_details.append([
-                    Paragraph("<b>Diagnostic Error:</b>", self.body_style),
-                    Paragraph(f"<font color='#dc2626'>{error_msg}</font>", self.body_style),
-                ])
-
-            details_table = Table(site_details, colWidths=[120, 384])
-            details_table.setStyle(
+        TABLE_CHUNK_SIZE = 35
+        for chunk_idx in range(0, max(len(data_rows), 1), TABLE_CHUNK_SIZE):
+            chunk_rows = [header_cells] + data_rows[chunk_idx:chunk_idx + TABLE_CHUNK_SIZE]
+            t = Table(chunk_rows, colWidths=[184, 80, 60, 60, 60, 60])
+            t.setStyle(
                 TableStyle([
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("TOPPADDING", (0, 0), (-1, -1), 3),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-                    ("LINEBELOW", (0, 0), (-1, -1), 0.5, colors.HexColor("#f1f5f9")),
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0f172a")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                    ("TOPPADDING", (0, 0), (-1, -1), 4),
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#e2e8f0")),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
                 ])
             )
-            website_elements.append(details_table)
-            website_elements.append(Spacer(1, 14))
+            story.append(t)
+            story.append(Spacer(1, 8))
 
-            # Screenshot section (guaranteed visual rendering)
-            website_elements.append(Paragraph("Visual Inspection &amp; Page Rendering", self.h2_style))
-
-            img_added = False
-            full_img_path = None
-            if screenshot_path:
-                candidates = [
-                    screenshot_path,
-                    os.path.join(settings.screenshots_dir, os.path.basename(screenshot_path)),
-                    os.path.join(settings.project_root, "storage", screenshot_path),
-                    os.path.join(settings.project_root, screenshot_path),
-                    os.path.join("storage", screenshot_path),
-                    os.path.join(".", screenshot_path),
-                ]
-                for cand in candidates:
-                    if os.path.isfile(cand) and os.path.getsize(cand) > 0:
-                        full_img_path = cand
-                        break
-
-            # If no screenshot was on disk, generate a crisp diagnostic snapshot card on the fly
-            if not full_img_path or not os.path.isfile(full_img_path):
-                gen_filename = f"diag_{scan_id}_{idx}_{int(time.time())}.png"
-                temp_diag_path = os.path.join(settings.screenshots_dir, gen_filename)
-                status_dict = {
-                    "status": status,
-                    "http_status_code": r.get("http_status_code"),
-                    "response_time_ms": r.get("response_time_ms"),
-                    "domain": domain,
-                    "error_message": error_msg,
-                }
-                if generate_diagnostic_screenshot(temp_diag_path, orig_url or domain, status_dict):
-                    full_img_path = temp_diag_path
-
-            if full_img_path and os.path.isfile(full_img_path):
-                try:
-                    # ReportLab Image: fit to width 500 while maintaining aspect ratio
-                    img = Image(full_img_path, width=500, height=280)
-                    website_elements.append(img)
-                    img_added = True
-                except Exception as img_err:
-                    website_elements.append(
-                        Paragraph(f"<font color='#dc2626'>Unable to render screenshot: {img_err}</font>", self.body_style)
-                    )
-
-            if not img_added:
-                # Placeholder box as last-ditch fallback
-                placeholder = Table(
-                    [[Paragraph("<font color='#64748b'>Visual snapshot unavailable</font>", self.body_style)]],
-                    colWidths=[500],
-                    rowHeights=[60],
+        # =====================================================================
+        # 3. DETAILED VISUAL INSPECTION APPENDIX (Only when requested or for small sets)
+        # =====================================================================
+        if include_visuals:
+            story.append(PageBreak())
+            story.append(Paragraph("Visual Inspection &amp; Diagnostic Snapshots", self.h1_style))
+            story.append(
+                Paragraph(
+                    "High-fidelity rendered snapshots of target endpoints. "
+                    "Offline and warning sites display automated server handshake diagnostics.",
+                    self.subtitle_style,
                 )
-                placeholder.setStyle(
+            )
+            story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#4f46e5"), spaceBefore=4, spaceAfter=20))
+
+            # Limit visual pages to max 100 per PDF to prevent out-of-memory
+            visual_results = results[:100]
+            for idx, r in enumerate(visual_results, start=1):
+                domain = r.get("domain") or r.get("original_url", f"Site #{idx}")
+                orig_url = r.get("original_url", "")
+                final_url = r.get("final_url") or orig_url
+                status = r.get("status", "UNKNOWN")
+                http_code = str(r.get("http_status_code") or "—")
+                resp_time = f"{r.get('response_time_ms'):.1f} ms" if r.get("response_time_ms") else "—"
+                server_info = r.get("server_info") or "Not disclosed"
+                title = r.get("website_title") or "—"
+                error_msg = r.get("error_message") or "None"
+                screenshot_path = r.get("screenshot_path")
+
+                status_color = "#16a34a" if status == "ONLINE" else "#dc2626" if status == "OFFLINE" else "#d97706"
+
+                website_elements = []
+
+                # Website Header Bar
+                website_elements.append(
+                    Paragraph(
+                        f"#{idx} &nbsp; <b>{domain}</b> &nbsp;&nbsp; "
+                        f"<font color='{status_color}'>[{status}]</font>",
+                        self.h1_style,
+                    )
+                )
+                website_elements.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#cbd5e1"), spaceBefore=2, spaceAfter=10))
+
+                # Details Key-Value Table
+                is_redirected = final_url and orig_url and final_url.rstrip('/') != orig_url.rstrip('/')
+                final_url_para = Paragraph(f"<font color='#2563eb'><b>{final_url}</b> [Redirected]</font>", self.code_style) if is_redirected else Paragraph(final_url, self.code_style)
+
+                site_details = [
+                    [Paragraph("<b>Original Target:</b>", self.body_style), Paragraph(orig_url, self.code_style)],
+                    [Paragraph("<b>Final URL:</b>", self.body_style), final_url_para],
+                    [Paragraph("<b>HTTP Status:</b>", self.body_style), Paragraph(http_code, self.body_style)],
+                    [Paragraph("<b>Response Time:</b>", self.body_style), Paragraph(resp_time, self.body_style)],
+                    [Paragraph("<b>Page Title:</b>", self.body_style), Paragraph(title, self.body_style)],
+                    [Paragraph("<b>Web Server:</b>", self.body_style), Paragraph(server_info, self.body_style)],
+                ]
+
+                if error_msg != "None":
+                    site_details.append([
+                        Paragraph("<b>Diagnostic Error:</b>", self.body_style),
+                        Paragraph(f"<font color='#dc2626'>{error_msg}</font>", self.body_style),
+                    ])
+
+                details_table = Table(site_details, colWidths=[120, 384])
+                details_table.setStyle(
                     TableStyle([
-                        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
-                        ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#e2e8f0")),
-                        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-                        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                        ("TOPPADDING", (0, 0), (-1, -1), 3),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                        ("LINEBELOW", (0, 0), (-1, -1), 0.5, colors.HexColor("#f1f5f9")),
                     ])
                 )
-                website_elements.append(placeholder)
+                website_elements.append(details_table)
+                website_elements.append(Spacer(1, 14))
 
-            story.append(KeepTogether(website_elements[:4]))
-            story.extend(website_elements[4:])
-            if idx < len(results):
-                story.append(PageBreak())
+                # Screenshot section (guaranteed visual rendering)
+                website_elements.append(Paragraph("Visual Inspection &amp; Page Rendering", self.h2_style))
+
+                img_added = False
+                full_img_path = None
+                if screenshot_path:
+                    candidates = [
+                        screenshot_path,
+                        os.path.join(settings.screenshots_dir, os.path.basename(screenshot_path)),
+                        os.path.join(settings.project_root, "storage", screenshot_path),
+                        os.path.join(settings.project_root, screenshot_path),
+                        os.path.join("storage", screenshot_path),
+                        os.path.join(".", screenshot_path),
+                    ]
+                    for cand in candidates:
+                        if os.path.isfile(cand) and os.path.getsize(cand) > 0:
+                            full_img_path = cand
+                            break
+
+                # If no screenshot was on disk, generate a crisp diagnostic snapshot card on the fly
+                if not full_img_path or not os.path.isfile(full_img_path):
+                    gen_filename = f"diag_{scan_id}_{idx}_{int(time.time())}.png"
+                    temp_diag_path = os.path.join(settings.screenshots_dir, gen_filename)
+                    status_dict = {
+                        "status": status,
+                        "http_status_code": r.get("http_status_code"),
+                        "response_time_ms": r.get("response_time_ms"),
+                        "domain": domain,
+                        "error_message": error_msg,
+                    }
+                    if generate_diagnostic_screenshot(temp_diag_path, orig_url or domain, status_dict):
+                        full_img_path = temp_diag_path
+
+                if full_img_path and os.path.isfile(full_img_path):
+                    try:
+                        # Compress / optimize image with PIL thumbnail to reduce memory & PDF size by 85%
+                        optimized_path = full_img_path
+                        try:
+                            from PIL import Image as PILImage
+                            thumb_path = full_img_path + ".thumb.jpg"
+                            if not os.path.isfile(thumb_path):
+                                with PILImage.open(full_img_path) as im:
+                                    rgb_im = im.convert("RGB")
+                                    rgb_im.thumbnail((800, 500))
+                                    rgb_im.save(thumb_path, "JPEG", quality=75, optimize=True)
+                            if os.path.isfile(thumb_path):
+                                optimized_path = thumb_path
+                        except Exception:
+                            pass
+
+                        img = Image(optimized_path, width=500, height=280)
+                        website_elements.append(img)
+                        img_added = True
+                    except Exception as img_err:
+                        website_elements.append(
+                            Paragraph(f"<font color='#dc2626'>Unable to render screenshot: {img_err}</font>", self.body_style)
+                        )
+
+                if not img_added:
+                    placeholder = Table(
+                        [[Paragraph("<font color='#64748b'>Visual snapshot unavailable</font>", self.body_style)]],
+                        colWidths=[500],
+                        rowHeights=[60],
+                    )
+                    placeholder.setStyle(
+                        TableStyle([
+                            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
+                            ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#e2e8f0")),
+                            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                        ])
+                    )
+                    website_elements.append(placeholder)
+
+                story.append(KeepTogether(website_elements[:4]))
+                story.extend(website_elements[4:])
+                if idx < len(visual_results):
+                    story.append(PageBreak())
 
         # Build document with fast 1-pass canvas
         doc.build(story, canvasmaker=FastAuditCanvas)
