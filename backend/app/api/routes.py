@@ -168,14 +168,18 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         except Exception as cache_load_err:
             logger.warning("Daily cache pre-load failed (proceeding without cache): %s", cache_load_err)
 
+        # Domain-level fast in-memory caches (eliminates duplicate DNS/SSL checks for identical domains)
+        _dns_memory_cache: Dict[str, list] = {}
+        _ssl_memory_cache: Dict[str, dict | None] = {}
+
         # Concurrency control:
-        # 1. URL network worker concurrency: 40 on Windows (150 on Colab) to prevent DNS packet drops and socket starvation
-        default_concurrency = 40 if sys.platform == "win32" else 150
+        # 1. URL network worker concurrency: 60 on Windows (200 on Colab)
+        default_concurrency = 60 if sys.platform == "win32" else 200
         concurrency_limit = min(settings.max_concurrent_scans, default_concurrency)
         url_semaphore = asyncio.Semaphore(concurrency_limit)
 
-        # 2. Screenshot concurrency: throttle Chromium to 6 on PC (15 on Colab) to preserve CPU
-        screenshot_limit = 6 if sys.platform == "win32" else getattr(settings, "max_concurrent_screenshots", 15)
+        # 2. Screenshot concurrency: 8 on Windows (15 on Colab)
+        screenshot_limit = 8 if sys.platform == "win32" else getattr(settings, "max_concurrent_screenshots", 15)
         screenshot_semaphore = asyncio.Semaphore(screenshot_limit)
 
         # -----------------------------------------------------------------------
@@ -213,8 +217,8 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                                 await save_ssl_details(db, scan_result_id=res_id, ssl_data=s_dat)
                             completed += 1
 
-                        # Update scan progress every 10 completions or when done
-                        if completed - last_progress_update >= 10 or completed == total:
+                        # Update scan progress every 25 completions or when done
+                        if completed - last_progress_update >= 25 or completed == total:
                             await update_scan_status(db, scan_id, "running", completed_urls=completed)
                             last_progress_update = completed
                 except Exception as write_err:
@@ -299,21 +303,29 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                         }
 
                 async def run_dns():
+                    if tentative_domain in _dns_memory_cache:
+                        return _dns_memory_cache[tentative_domain]
                     try:
                         res = await asyncio.wait_for(
                             dns_analyzer.analyze(tentative_domain),
-                            timeout=8.0,
+                            timeout=6.0,
                         )
-                        return res.get("records", [])
+                        recs = res.get("records", [])
+                        _dns_memory_cache[tentative_domain] = recs
+                        return recs
                     except Exception:
                         return []
 
                 async def run_ssl():
+                    if tentative_domain in _ssl_memory_cache:
+                        return _ssl_memory_cache[tentative_domain]
                     try:
-                        return await asyncio.wait_for(
+                        res = await asyncio.wait_for(
                             ssl_checker.check(tentative_domain),
-                            timeout=8.0,
+                            timeout=6.0,
                         )
+                        _ssl_memory_cache[tentative_domain] = res
+                        return res
                     except Exception:
                         return None
 

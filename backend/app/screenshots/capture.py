@@ -212,6 +212,18 @@ def _sync_capture_worker(
                         "--disable-dev-shm-usage",
                         "--no-sandbox",
                         "--disable-setuid-sandbox",
+                        "--disable-extensions",
+                        "--disable-background-networking",
+                        "--disable-background-timer-throttling",
+                        "--disable-backgrounding-occluded-windows",
+                        "--disable-breakpad",
+                        "--disable-component-extensions-with-background-pages",
+                        "--disable-features=TranslateUI,BlinkGenPropertyTrees",
+                        "--disable-ipc-flooding-protection",
+                        "--disable-renderer-backgrounding",
+                        "--mute-audio",
+                        "--no-first-run",
+                        "--no-default-browser-check",
                     ],
                 )
                 try:
@@ -227,22 +239,31 @@ def _sync_capture_worker(
                     page = context.new_page()
                     page.set_default_navigation_timeout(timeout_ms)
 
-                    # Robust navigation: wait for 'commit' so slow trackers/assets don't block screenshot
+                    # Abort heavy video/audio streaming to prevent network and CPU choking
+                    try:
+                        page.route(
+                            re.compile(r"\.(mp4|webm|ogg|avi|mov|wmv|flv|mkv)(\?.*)?$", re.IGNORECASE),
+                            lambda route: route.abort(),
+                        )
+                    except Exception:
+                        pass
+
+                    # Fast, reliable navigation: wait for 'commit' so slow external trackers don't stall capture
                     try:
                         page.goto(url, wait_until="commit", timeout=timeout_ms)
                         try:
-                            page.wait_for_load_state("domcontentloaded", timeout=min(timeout_ms, 10000))
+                            page.wait_for_load_state("domcontentloaded", timeout=min(timeout_ms, 4000))
                         except Exception:
                             pass
-                        page.wait_for_timeout(1000)
+                        page.wait_for_timeout(300)
                         page.screenshot(path=abs_path, full_page=False, type="png")
                         if os.path.exists(abs_path) and os.path.getsize(abs_path) > 1000:
                             browser_captured = True
                     except Exception as nav_err:
                         try:
                             # Secondary attempt with wait_until='load'
-                            page.goto(url, wait_until="load", timeout=timeout_ms)
-                            page.wait_for_timeout(500)
+                            page.goto(url, wait_until="load", timeout=min(timeout_ms, 8000))
+                            page.wait_for_timeout(300)
                             page.screenshot(path=abs_path, full_page=False, type="png")
                             if os.path.exists(abs_path) and os.path.getsize(abs_path) > 1000:
                                 browser_captured = True

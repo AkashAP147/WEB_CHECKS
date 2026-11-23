@@ -110,21 +110,16 @@ class HttpScanner:
             result["error_message"] = f"Invalid URL: {exc}"
             return result
 
-        # -- SSRF pre-flight (non-blocking in thread pool with 5s timeout) ---
+        # -- Fast SSRF pre-flight (zero thread-pool overhead for domain targets) ---
         try:
-            is_safe, block_reason = await asyncio.wait_for(
-                asyncio.to_thread(resolve_and_check, url), timeout=5.0
-            )
-            if not is_safe:
-                if block_reason == "DNS_ERROR":
-                    result["status"] = STATUS_DNS_ERROR
-                    result["error_message"] = "DNS resolution failed: unable to resolve domain name."
-                else:
+            parsed = urlparse(url)
+            host = parsed.hostname or ""
+            if _is_ip_literal(host):
+                if not _is_ip_safe(host):
                     result["status"] = STATUS_BLOCKED
-                    result["error_message"] = "SSRF Protection: Access to private, loopback, or internal addresses is blocked."
-                return result
-        except asyncio.TimeoutError:
-            # If pre-flight DNS takes longer than 5s, let HTTP client attempt connection directly
+                    result["error_message"] = "SSRF Protection: Access to private or loopback IP addresses is blocked."
+                    return result
+        except Exception:
             pass
 
         # -- Issue request with manual redirect following --------------------
