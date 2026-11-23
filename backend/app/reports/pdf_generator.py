@@ -126,9 +126,32 @@ class PDFReportGenerator:
         scan: Dict[str, Any],
         results: List[Dict[str, Any]],
         output_path: str,
+        status_filter: Optional[str] = None,
     ) -> str:
-        """Create the PDF report and write to output_path."""
+        """Create the PDF report and write to output_path with status sorting & filtering."""
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+        # 1. Apply status filtering if requested (ONLINE, OFFLINE, ERRORS)
+        filtered_results = list(results)
+        if status_filter:
+            sf = status_filter.strip().upper()
+            if sf == "ONLINE":
+                filtered_results = [r for r in filtered_results if str(r.get("status") or "").upper() == "ONLINE"]
+            elif sf == "OFFLINE":
+                filtered_results = [r for r in filtered_results if str(r.get("status") or "").upper() == "OFFLINE"]
+            elif sf in ("ERRORS", "ERROR", "WARNINGS"):
+                filtered_results = [
+                    r for r in filtered_results if str(r.get("status") or "").upper() not in ("ONLINE", "OFFLINE")
+                ]
+
+        # 2. Sort results: ONLINE first -> OFFLINE second -> ERRORS & WARNINGS third
+        def _get_sort_key(r: Dict[str, Any]):
+            st = str(r.get("status") or "").upper()
+            rank = 1 if st == "ONLINE" else (2 if st == "OFFLINE" else 3)
+            domain_key = str(r.get("domain") or r.get("original_url") or "").lower()
+            return (rank, domain_key)
+
+        results = sorted(filtered_results, key=_get_sort_key)
 
         doc = SimpleDocTemplate(
             output_path,
@@ -140,6 +163,20 @@ class PDFReportGenerator:
         )
 
         story = []
+
+        # Helper for date display
+        def _format_pdf_dt(dt_val: Any) -> str:
+            if not dt_val:
+                return datetime.now(timezone.utc).strftime("%b %d, %Y, %I:%M %p UTC")
+            try:
+                s = str(dt_val).strip()
+                clean = s.replace("Z", "").replace("T", " ")
+                if "." in clean:
+                    clean = clean.split(".")[0]
+                dt = datetime.fromisoformat(clean)
+                return dt.strftime("%b %d, %Y, %I:%M:%S %p UTC")
+            except Exception:
+                return str(dt_val)
 
         # =====================================================================
         # 1. COVER PAGE
@@ -169,11 +206,15 @@ class PDFReportGenerator:
         story.append(Spacer(1, 40))
 
         # Big Title & Subtitle
-        story.append(Paragraph("Website Health &amp; DNS Audit Report", self.title_style))
+        scope_title = "Website Health &amp; DNS Audit Report"
+        if status_filter:
+            scope_title += f" &mdash; <font color='#4f46e5'>{status_filter.upper()} Targets Only</font>"
+
+        story.append(Paragraph(scope_title, self.title_style))
         story.append(
             Paragraph(
                 "Automated verification of availability, DNS configuration, SSL certificates, "
-                "and visual rendering.",
+                "and visual rendering. Targets sorted by status (Online &rarr; Offline &rarr; Errors).",
                 self.subtitle_style,
             )
         )
@@ -182,13 +223,15 @@ class PDFReportGenerator:
 
         # Scan Metadata block
         scan_id = scan.get("id", "N/A")
-        created_at = scan.get("created_at", datetime.now(timezone.utc).isoformat())
-        total_urls = len(results) if results else scan.get("total_urls", 0)
+        created_at_raw = scan.get("created_at")
+        formatted_date = _format_pdf_dt(created_at_raw)
+        total_urls = len(results)
 
         meta_data = [
             [Paragraph("<b>Audit ID:</b>", self.body_style), Paragraph(str(scan_id), self.code_style)],
-            [Paragraph("<b>Scan Timestamp:</b>", self.body_style), Paragraph(str(created_at), self.body_style)],
-            [Paragraph("<b>Total Websites Audited:</b>", self.body_style), Paragraph(str(total_urls), self.body_style)],
+            [Paragraph("<b>Audit Timestamp:</b>", self.body_style), Paragraph(formatted_date, self.body_style)],
+            [Paragraph("<b>Report Scope:</b>", self.body_style), Paragraph(f"<b>{status_filter.upper() if status_filter else 'ALL (Sorted)'}</b>", self.body_style)],
+            [Paragraph("<b>Total Targets in Report:</b>", self.body_style), Paragraph(str(total_urls), self.body_style)],
             [Paragraph("<b>Audit Engine:</b>", self.body_style), Paragraph("WebPulse Core v1.0 (dnspython, HTTPX, Playwright)", self.body_style)],
         ]
         meta_table = Table(meta_data, colWidths=[160, 344])

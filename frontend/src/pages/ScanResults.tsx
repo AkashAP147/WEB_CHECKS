@@ -22,6 +22,8 @@ import {
   Filter,
   Search,
   FileSpreadsheet,
+  Square,
+  Activity,
 } from 'lucide-react';
 import { useScan } from '../hooks/useScan';
 import { scanApi } from '../services/api';
@@ -93,14 +95,34 @@ export default function ScanResults() {
   };
 
   const [pdfBatch, setPdfBatch] = useState<number>(0);
+  const [pdfStatusFilter, setPdfStatusFilter] = useState<'ALL' | 'ONLINE' | 'OFFLINE' | 'ERRORS'>('ALL');
+  const [isStopping, setIsStopping] = useState<boolean>(false);
 
-  const handleDownload = (type: 'pdf' | 'excel' | 'csv', batchNum?: number) => {
+  const handleStopScan = async () => {
+    if (!scanId) return;
+    setIsStopping(true);
+    try {
+      await scanApi.cancelScan(scanId);
+      await loadScan(scanId);
+    } catch (err) {
+      console.error('Failed to stop scan', err);
+    } finally {
+      setIsStopping(false);
+    }
+  };
+
+  const handleDownload = (type: 'pdf' | 'excel' | 'csv', batchNum?: number, statusOverride?: string) => {
     if (!scanId) return;
     let url = `/api/reports/${scanId}/${type}`;
+    const params = new URLSearchParams();
     const selectedBatch = batchNum !== undefined ? batchNum : pdfBatch;
-    if (type === 'pdf' && selectedBatch > 0) {
-      url += `?batch=${selectedBatch}`;
+    if (type === 'pdf') {
+      if (selectedBatch > 0) params.set('batch', String(selectedBatch));
+      const s = statusOverride !== undefined ? statusOverride : pdfStatusFilter;
+      if (s && s !== 'ALL') params.set('status', s);
     }
+    const qs = params.toString();
+    if (qs) url += `?${qs}`;
 
     // Direct browser native download: NO Javascript in-memory buffering & NO 120s timeout
     const link = document.createElement('a');
@@ -116,6 +138,7 @@ export default function ScanResults() {
   const online = safeResults.filter(r => r.status === 'ONLINE').length;
   const offline = safeResults.filter(r => r.status === 'OFFLINE').length;
   const errors = total - (online + offline);
+  const isScanning = scan?.status === 'running' || scan?.status === 'pending';
 
   // Filtered targets
   const filteredResults = safeResults.filter(item => {
@@ -165,6 +188,35 @@ export default function ScanResults() {
 
         {/* Action Buttons */}
         <div className="flex flex-wrap items-center gap-2">
+          {isScanning && (
+            <button
+              onClick={handleStopScan}
+              disabled={isStopping}
+              className="btn-danger text-xs py-2 px-3.5 shadow-xs flex items-center gap-1.5"
+              title="Stop active scan process immediately"
+            >
+              {isStopping ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Square className="w-3.5 h-3.5 fill-current" />
+              )}
+              <span>Stop Scan</span>
+            </button>
+          )}
+
+          {/* PDF Status Scope Selector */}
+          <select
+            value={pdfStatusFilter}
+            onChange={(e) => setPdfStatusFilter(e.target.value as any)}
+            className="text-xs py-2 px-2.5 rounded-lg border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 text-surface-700 dark:text-surface-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 shadow-xs cursor-pointer"
+            title="Choose which targets to include in PDF export"
+          >
+            <option value="ALL">PDF: Full (Online &rarr; Offline &rarr; Errors)</option>
+            <option value="ONLINE">PDF: Online Only ({online})</option>
+            <option value="OFFLINE">PDF: Offline Only ({offline})</option>
+            <option value="ERRORS">PDF: Errors &amp; Warnings ({errors})</option>
+          </select>
+
           {total > 100 && (
             <select
               value={pdfBatch}
@@ -172,7 +224,7 @@ export default function ScanResults() {
               className="text-xs py-2 px-2.5 rounded-lg border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 text-surface-700 dark:text-surface-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 shadow-xs cursor-pointer"
               title="Select PDF batch to download"
             >
-              <option value={0}>Full Audit ({total} Targets)</option>
+              <option value={0}>All Targets ({total})</option>
               {Array.from({ length: Math.ceil(total / 100) }, (_, i) => (
                 <option key={i + 1} value={i + 1}>
                   Batch {i + 1} ({i * 100 + 1} - {Math.min((i + 1) * 100, total)})
@@ -212,6 +264,60 @@ export default function ScanResults() {
           </button>
         </div>
       </div>
+
+      {/* Live Scan In Progress Banner with Stop Button */}
+      {isScanning && (
+        <div className="card p-4 border-indigo-200 dark:border-indigo-900 bg-gradient-to-r from-indigo-50/80 to-blue-50/80 dark:from-indigo-950/40 dark:to-blue-950/40 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-sm animate-fade-in">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 rounded-xl bg-indigo-600 text-white animate-pulse shrink-0">
+              <Activity className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="badge badge-info text-xs">AUDIT IN PROGRESS</span>
+                <span className="text-xs text-surface-600 dark:text-surface-300 font-mono">
+                  {scan?.completed_urls || 0} of {scan?.total_urls || 0} Targets Audited ({Math.round(scan?.progress_pct || 0)}%)
+                </span>
+              </div>
+              <p className="text-xs text-surface-500 dark:text-surface-400 mt-0.5">
+                Multi-worker engines are verifying HTTP response, DNS lookup, SSL validity, and visual snapshots.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3 w-full md:w-auto shrink-0">
+            <div className="flex-1 md:w-48 bg-surface-200 dark:bg-surface-700 h-2.5 rounded-full overflow-hidden">
+              <div
+                className="bg-indigo-600 h-full rounded-full transition-all duration-300"
+                style={{ width: `${Math.min(100, Math.round(scan?.progress_pct || 0))}%` }}
+              />
+            </div>
+            <button
+              onClick={handleStopScan}
+              disabled={isStopping}
+              className="btn-danger text-xs py-1.5 px-3 whitespace-nowrap shadow-xs"
+            >
+              {isStopping ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Square className="w-3.5 h-3.5 fill-current" />}
+              <span>Stop Audit</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Cancelled Alert Banner */}
+      {scan?.status === 'cancelled' && (
+        <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/50 flex items-center justify-between gap-2 text-amber-800 dark:text-amber-300 text-xs shadow-xs animate-fade-in">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-amber-500" />
+            <span>
+              <strong>Audit Stopped by User:</strong> Processing was halted. Showing {total} targets evaluated prior to stopping.
+            </span>
+          </div>
+          <span className="font-mono text-[11px] font-semibold opacity-80 uppercase px-2 py-0.5 rounded bg-amber-100 dark:bg-amber-900/40">
+            Cancelled
+          </span>
+        </div>
+      )}
 
       {/* Interactive KPI Overview Strip */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

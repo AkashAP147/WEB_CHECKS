@@ -28,7 +28,7 @@ def _rows_to_dicts(rows: list[aiosqlite.Row]) -> list[dict]:
 
 
 def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +135,52 @@ async def get_scan_results(db: aiosqlite.Connection, scan_id: str) -> list[dict]
     )
     rows = await cursor.fetchall()
     return _rows_to_dicts(rows)
+
+
+async def get_recent_cached_result(
+    db: aiosqlite.Connection, url_or_domain: str
+) -> tuple[dict, list[dict], dict | None] | None:
+    """Check if URL or domain was already scanned within the last 24 hours.
+    Returns (result_dict, dns_records, ssl_details) if cached, else None."""
+    cursor = await db.execute(
+        """
+        SELECT id, original_url, final_url, domain, status,
+               http_status_code, response_time_ms, server_info,
+               website_title, screenshot_path, error_message, created_at
+        FROM scan_results
+        WHERE (original_url = ? OR domain = ? OR final_url = ?)
+          AND created_at >= datetime('now', '-24 hours')
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (url_or_domain, url_or_domain, url_or_domain),
+    )
+    row = await cursor.fetchone()
+    if not row:
+        return None
+    res = _row_to_dict(row)
+    cached_id = res["id"]
+
+    # Fetch DNS records
+    dns_cursor = await db.execute(
+        """
+        SELECT domain, record_type, record_value, ttl, lookup_status, error_message, lookup_time_ms
+        FROM dns_records WHERE scan_result_id = ?
+        """,
+        (cached_id,),
+    )
+    dns_rows = await dns_cursor.fetchall()
+    dns_recs = _rows_to_dicts(dns_rows)
+
+    # Fetch SSL details
+    ssl_cursor = await db.execute(
+        "SELECT * FROM ssl_details WHERE scan_result_id = ? LIMIT 1",
+        (cached_id,),
+    )
+    ssl_row = await ssl_cursor.fetchone()
+    ssl_data = _row_to_dict(ssl_row)
+
+    return res, dns_recs, ssl_data
 
 
 # ---------------------------------------------------------------------------

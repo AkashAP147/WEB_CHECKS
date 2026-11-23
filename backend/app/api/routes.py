@@ -44,6 +44,7 @@ from backend.app.database.repository import (
     get_scan_history,
     get_dashboard_stats,
     get_results_by_time_range,
+    get_recent_cached_result,
 )
 from backend.app.utils.url_validator import validate_url, is_safe_url, validate_excel_file
 from backend.app.scanners.http_scanner import HttpScanner
@@ -201,6 +202,34 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                 tentative_domain = (parsed.netloc or parsed.path).split(":")[0].split("/")[0]
             except Exception:
                 tentative_domain = raw_url.replace("https://", "").replace("http://", "").split("/")[0]
+
+            # Daily URL cache check: skip re-auditing if already checked in the last 24 hours
+            try:
+                async with get_db() as db:
+                    cached_data = await get_recent_cached_result(db, raw_url)
+                    if not cached_data and tentative_domain:
+                        cached_data = await get_recent_cached_result(db, tentative_domain)
+            except Exception as cache_err:
+                logger.debug("Cache check error for %s: %s", raw_url, cache_err)
+                cached_data = None
+
+            if cached_data:
+                cached_res, cached_dns, cached_ssl = cached_data
+                reused_res = {
+                    "original_url": raw_url,
+                    "final_url": cached_res.get("final_url") or raw_url,
+                    "domain": cached_res.get("domain") or tentative_domain,
+                    "status": cached_res.get("status", "ONLINE"),
+                    "http_status_code": cached_res.get("http_status_code"),
+                    "response_time_ms": cached_res.get("response_time_ms"),
+                    "server_info": cached_res.get("server_info"),
+                    "website_title": cached_res.get("website_title"),
+                    "screenshot_path": cached_res.get("screenshot_path"),
+                    "error_message": cached_res.get("error_message"),
+                }
+                logger.info("Daily cache: Reusing today's audit result for %s", raw_url)
+                await db_queue.put((reused_res, cached_dns, cached_ssl))
+                return
 
             # 1, 2, 3: Run HTTP, DNS, and SSL in parallel with shared client
             async def run_http():
@@ -493,15 +522,15 @@ async def get_scan_results_endpoint(scan_id: str):
 
 
 # ---------------------------------------------------------------------------
-# POST /api/scan/{scan_id}/cancel
+# POST /api/scan/{scan_id}/cancel and /stop
 # ---------------------------------------------------------------------------
 @router.post("/scan/{scan_id}/cancel")
+@router.post("/scan/{scan_id}/stop")
 async def cancel_scan(scan_id: str):
     task = _running_tasks.get(scan_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail="No running scan found with this ID.")
-    task.cancel()
-    _running_tasks.pop(scan_id, None)
+    if task is not None:
+        task.cancel()
+        _running_tasks.pop(scan_id, None)
 
     async with get_db() as db:
         await update_scan_status(db, scan_id, "cancelled")
@@ -742,6 +771,7 @@ async def download_pdf_report(
     refresh: bool = Query(False),
     batch: Optional[int] = Query(None),
     batch_size: int = Query(100),
+    status: Optional[str] = Query(None, description="Filter: ALL, ONLINE, OFFLINE, ERRORS"),
 ):
     if PDFReportGenerator is None:
         raise HTTPException(status_code=501, detail="PDF report generation is not available.")
@@ -753,22 +783,35 @@ async def download_pdf_report(
             raise HTTPException(status_code=404, detail="Scan not found.")
         results = await get_scan_results(db, scan_id)
 
+    # Filter by status if requested
+    filtered_results = results
+    status_suffix = ""
+    if status and status.upper() != "ALL":
+        sf = status.strip().upper()
+        status_suffix = f"_{sf.lower()}"
+        if sf == "ONLINE":
+            filtered_results = [r for r in results if str(r.get("status") or "").upper() == "ONLINE"]
+        elif sf == "OFFLINE":
+            filtered_results = [r for r in results if str(r.get("status") or "").upper() == "OFFLINE"]
+        elif sf in ("ERRORS", "ERROR", "WARNINGS"):
+            filtered_results = [r for r in results if str(r.get("status") or "").upper() not in ("ONLINE", "OFFLINE")]
+
     # Support batched PDF slices for large target lists (e.g. 100 targets per batch)
+    batch_suffix = ""
     if batch is not None and batch > 0:
         start_idx = (batch - 1) * batch_size
-        end_idx = min(start_idx + batch_size, len(results))
-        batch_results = results[start_idx:end_idx]
-        filename = f"report_{scan_id}_batch_{batch}.pdf"
+        end_idx = min(start_idx + batch_size, len(filtered_results))
+        batch_results = filtered_results[start_idx:end_idx]
+        batch_suffix = f"_batch_{batch}"
     else:
-        batch_results = results
-        filename = f"report_{scan_id}.pdf"
+        batch_results = filtered_results
 
+    filename = f"WebPulse_Audit_{scan_id[:8]}{status_suffix}{batch_suffix}.pdf"
     filepath = os.path.join(settings.reports_dir, filename)
 
-    # Always generate or regenerate when requested or if missing
-    if refresh or not os.path.isfile(filepath):
-        generator = PDFReportGenerator()
-        await generator.generate(scan=scan, results=batch_results, output_path=filepath)
+    # Always generate or regenerate when requested, filtered, or if missing
+    generator = PDFReportGenerator()
+    await generator.generate(scan=scan, results=batch_results, output_path=filepath, status_filter=status)
 
     return FileResponse(
         filepath,

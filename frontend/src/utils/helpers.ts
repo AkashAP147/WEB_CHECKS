@@ -65,16 +65,40 @@ export function formatResponseTime(ms: number | null | undefined): string {
 export function formatDate(dateStr: string | null | undefined): string {
   if (!dateStr) return '—';
   try {
-    const date = new Date(dateStr);
-    return date.toLocaleDateString('en-US', {
+    let s = String(dateStr).trim();
+    // Normalize SQLite "YYYY-MM-DD HH:MM:SS" -> "YYYY-MM-DDTHH:MM:SS"
+    if (s.includes(' ') && !s.includes('T')) {
+      s = s.replace(' ', 'T');
+    }
+    // If no timezone offset exists, explicitly tag as UTC so the browser converts to local time
+    if (!s.endsWith('Z') && !s.includes('+') && !s.slice(-6).match(/[+-]\d\d:\d\d/)) {
+      s += 'Z';
+    }
+    const date = new Date(s);
+    if (isNaN(date.getTime())) {
+      const fallback = new Date(dateStr);
+      if (isNaN(fallback.getTime())) return String(dateStr);
+      return fallback.toLocaleString(undefined, {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: true,
+      });
+    }
+    return date.toLocaleString(undefined, {
       year: 'numeric',
       month: 'short',
       day: 'numeric',
       hour: '2-digit',
       minute: '2-digit',
+      second: '2-digit',
+      hour12: true,
     });
   } catch {
-    return dateStr;
+    return String(dateStr);
   }
 }
 
