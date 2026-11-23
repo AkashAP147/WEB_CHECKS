@@ -520,7 +520,7 @@ async def start_scan_json(payload: Dict[str, Any]):
     scan_id = str(uuid.uuid4())
     created_at = _now_iso()
     async with get_db() as db:
-        await create_scan(db, scan_id=scan_id, urls=validated, created_at=created_at)
+        await create_scan(db, scan_id=scan_id, total_urls=len(validated))
 
     task = asyncio.create_task(_run_scan(scan_id, validated))
     _running_tasks[scan_id] = task

@@ -101,6 +101,14 @@ async def save_scan_result(
     db: aiosqlite.Connection, scan_id: str, result_data: dict
 ) -> int:
     """Insert a scan_result row and return its auto-generated id."""
+    valid_statuses = {
+        'ONLINE', 'OFFLINE', 'HTTP_ERROR', 'TIMEOUT',
+        'SSL_ERROR', 'DNS_ERROR', 'BROWSER_ERROR', 'BLOCKED'
+    }
+    raw_status = str(result_data.get("status") or "ONLINE").upper()
+    if raw_status not in valid_statuses:
+        raw_status = "BLOCKED" if "BLOCK" in raw_status else "OFFLINE"
+
     cursor = await db.execute(
         """
         INSERT INTO scan_results
@@ -114,7 +122,7 @@ async def save_scan_result(
             result_data.get("original_url"),
             result_data.get("final_url"),
             result_data.get("domain"),
-            result_data.get("status", "ONLINE"),
+            raw_status,
             result_data.get("http_status_code"),
             result_data.get("response_time_ms"),
             result_data.get("server_info"),
