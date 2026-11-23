@@ -1,6 +1,13 @@
 import uvicorn
 import sys
 import os
+import asyncio
+
+if sys.platform == "win32":
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    except Exception:
+        pass
 
 backend_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(backend_dir)
@@ -13,6 +20,7 @@ if __name__ == "__main__":
         "backend.app.main:app",
         host="0.0.0.0",
         port=8000,
+        loop="none" if sys.platform == "win32" else "auto",
         reload=True,
         reload_dirs=[backend_dir],
         reload_excludes=["*.db", "*.db-wal", "*.db-shm", "*.png", "*.pdf", "*.xlsx", "storage/*"],

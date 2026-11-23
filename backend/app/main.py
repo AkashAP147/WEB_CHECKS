@@ -1,7 +1,15 @@
 import os
+import sys
+import asyncio
 import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
+
+if sys.platform == "win32":
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    except Exception:
+        pass
 
 logging.basicConfig(
     level=logging.INFO,

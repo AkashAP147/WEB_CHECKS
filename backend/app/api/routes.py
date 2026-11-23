@@ -178,17 +178,21 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
 
             domain = http_res.get("domain") or tentative_domain
 
-            # 4. Screenshot Capture (protected by screenshot semaphore)
+            # 4. Universal Screenshot Capture (protected by screenshot semaphore)
+            # Guarantees a visual snapshot for EVERY website (online, HTTP errors, offline, DNS/SSL errors)
             screenshot_path = None
-            if http_res.get("status") in ("ONLINE", "HTTP_ERROR") or http_res.get("http_status_code"):
-                try:
-                    target_to_capture = http_res.get("final_url") or raw_url
-                    async with screenshot_semaphore:
-                        ss_res = await screenshot_capturer.capture(target_to_capture, scan_id)
-                    if ss_res.get("success"):
-                        screenshot_path = ss_res.get("screenshot_path")
-                except Exception as ss_err:
-                    logger.error("Screenshot error for %s: %s", raw_url, ss_err)
+            try:
+                target_to_capture = http_res.get("final_url") or raw_url
+                async with screenshot_semaphore:
+                    ss_res = await screenshot_capturer.capture(
+                        target_to_capture,
+                        scan_id,
+                        status_info=http_res,
+                    )
+                if ss_res.get("success"):
+                    screenshot_path = ss_res.get("screenshot_path")
+            except Exception as ss_err:
+                logger.error("Screenshot error for %s: %s", raw_url, ss_err)
 
             http_res["screenshot_path"] = screenshot_path
 
@@ -642,7 +646,7 @@ async def export_time_range_excel(
 # GET /api/reports/{scan_id}/pdf
 # ---------------------------------------------------------------------------
 @router.get("/reports/{scan_id}/pdf")
-async def download_pdf_report(scan_id: str):
+async def download_pdf_report(scan_id: str, refresh: bool = Query(False)):
     if PDFReportGenerator is None:
         raise HTTPException(status_code=501, detail="PDF report generation is not available.")
 
@@ -656,8 +660,8 @@ async def download_pdf_report(scan_id: str):
     filename = f"report_{scan_id}.pdf"
     filepath = os.path.join(settings.reports_dir, filename)
 
-    # Generate only if not cached
-    if not os.path.isfile(filepath):
+    # Always generate or regenerate when requested or if missing
+    if refresh or not os.path.isfile(filepath):
         generator = PDFReportGenerator()
         await generator.generate(scan=scan, results=results, output_path=filepath)
 

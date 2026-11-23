@@ -44,6 +44,10 @@ export default function ScanResults() {
   const [dnsFilter, setDnsFilter] = useState<string>('ALL');
   const [downloadingType, setDownloadingType] = useState<'pdf' | 'excel' | null>(null);
 
+  // Status & Search filtering
+  const [statusFilter, setStatusFilter] = useState<'ALL' | 'ONLINE' | 'OFFLINE' | 'ERRORS'>('ALL');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+
   // Lazy loaded details per scan result
   const [dnsDataMap, setDnsDataMap] = useState<Record<number, DNSRecord[]>>({});
   const [sslDataMap, setSslDataMap] = useState<Record<number, SSLDetail | null>>({});
@@ -111,6 +115,26 @@ export default function ScanResults() {
   const offline = safeResults.filter(r => r.status === 'OFFLINE').length;
   const errors = total - (online + offline);
 
+  // Filtered targets
+  const filteredResults = safeResults.filter(item => {
+    if (statusFilter === 'ONLINE' && item.status !== 'ONLINE') return false;
+    if (statusFilter === 'OFFLINE' && item.status !== 'OFFLINE') return false;
+    if (statusFilter === 'ERRORS' && (item.status === 'ONLINE' || item.status === 'OFFLINE')) return false;
+
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase().trim();
+      const domain = (item.domain || '').toLowerCase();
+      const origUrl = (item.original_url || '').toLowerCase();
+      const title = (item.website_title || '').toLowerCase();
+      const errMsg = (item.error_message || '').toLowerCase();
+      const httpCode = String(item.http_status_code || '');
+      if (!domain.includes(q) && !origUrl.includes(q) && !title.includes(q) && !errMsg.includes(q) && !httpCode.includes(q)) {
+        return false;
+      }
+    }
+    return true;
+  });
+
   return (
     <div className="space-y-8 animate-fade-in pb-16">
       {/* Top Header */}
@@ -167,43 +191,179 @@ export default function ScanResults() {
         </div>
       </div>
 
-      {/* KPI Overview Strip */}
+      {/* Interactive KPI Overview Strip */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <div className="card p-4">
-          <span className="text-xs text-surface-500">Audited Targets</span>
+        <button
+          onClick={() => setStatusFilter('ALL')}
+          className={`card p-4 text-left transition-all cursor-pointer ${
+            statusFilter === 'ALL'
+              ? 'ring-2 ring-indigo-500 bg-indigo-50/40 dark:bg-indigo-950/20'
+              : 'hover:border-surface-300 dark:hover:border-surface-600'
+          }`}
+        >
+          <span className="text-xs text-surface-500 font-medium">Audited Targets</span>
           <div className="text-2xl font-bold text-surface-900 dark:text-white mt-1">
             {total}
           </div>
-        </div>
-        <div className="card p-4">
-          <span className="text-xs text-emerald-600 dark:text-emerald-400">Online Websites</span>
+          <span className="text-[11px] text-surface-400 mt-0.5 block">Click to view all</span>
+        </button>
+
+        <button
+          onClick={() => setStatusFilter(statusFilter === 'ONLINE' ? 'ALL' : 'ONLINE')}
+          className={`card p-4 text-left transition-all cursor-pointer ${
+            statusFilter === 'ONLINE'
+              ? 'ring-2 ring-emerald-500 bg-emerald-50/40 dark:bg-emerald-950/20'
+              : 'hover:border-surface-300 dark:hover:border-surface-600'
+          }`}
+        >
+          <span className="text-xs text-emerald-600 dark:text-emerald-400 font-medium">Online Websites</span>
           <div className="text-2xl font-bold text-emerald-600 dark:text-emerald-400 mt-1">
             {online}
           </div>
-        </div>
-        <div className="card p-4">
-          <span className="text-xs text-rose-600 dark:text-rose-400">Offline Websites</span>
+          <span className="text-[11px] text-emerald-600/70 dark:text-emerald-400/70 mt-0.5 block">
+            Filter online ({Math.round(total ? (online / total) * 100 : 0)}%)
+          </span>
+        </button>
+
+        <button
+          onClick={() => setStatusFilter(statusFilter === 'OFFLINE' ? 'ALL' : 'OFFLINE')}
+          className={`card p-4 text-left transition-all cursor-pointer ${
+            statusFilter === 'OFFLINE'
+              ? 'ring-2 ring-rose-500 bg-rose-50/40 dark:bg-rose-950/20'
+              : 'hover:border-surface-300 dark:hover:border-surface-600'
+          }`}
+        >
+          <span className="text-xs text-rose-600 dark:text-rose-400 font-medium">Offline Websites</span>
           <div className="text-2xl font-bold text-rose-600 dark:text-rose-400 mt-1">
             {offline}
           </div>
-        </div>
-        <div className="card p-4">
-          <span className="text-xs text-amber-600 dark:text-amber-400">Errors &amp; Warnings</span>
+          <span className="text-[11px] text-rose-600/70 dark:text-rose-400/70 mt-0.5 block">
+            Filter offline ({Math.round(total ? (offline / total) * 100 : 0)}%)
+          </span>
+        </button>
+
+        <button
+          onClick={() => setStatusFilter(statusFilter === 'ERRORS' ? 'ALL' : 'ERRORS')}
+          className={`card p-4 text-left transition-all cursor-pointer ${
+            statusFilter === 'ERRORS'
+              ? 'ring-2 ring-amber-500 bg-amber-50/40 dark:bg-amber-950/20'
+              : 'hover:border-surface-300 dark:hover:border-surface-600'
+          }`}
+        >
+          <span className="text-xs text-amber-600 dark:text-amber-400 font-medium">Errors &amp; Warnings</span>
           <div className="text-2xl font-bold text-amber-600 dark:text-amber-400 mt-1">
             {errors}
           </div>
+          <span className="text-[11px] text-amber-600/70 dark:text-amber-400/70 mt-0.5 block">
+            HTTP/DNS/SSL errors
+          </span>
+        </button>
+      </div>
+
+      {/* Filter and Search Bar */}
+      <div className="card p-4 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4">
+        {/* Status Filter Tabs */}
+        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0">
+          <button
+            onClick={() => setStatusFilter('ALL')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 whitespace-nowrap ${
+              statusFilter === 'ALL'
+                ? 'bg-indigo-600 text-white shadow-xs'
+                : 'bg-surface-100 dark:bg-surface-800 text-surface-600 dark:text-surface-400 hover:bg-surface-200 dark:hover:bg-surface-700'
+            }`}
+          >
+            <span>All Targets</span>
+            <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-black/20 dark:bg-white/20">
+              {total}
+            </span>
+          </button>
+
+          <button
+            onClick={() => setStatusFilter('ONLINE')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 whitespace-nowrap ${
+              statusFilter === 'ONLINE'
+                ? 'bg-emerald-600 text-white shadow-xs'
+                : 'bg-surface-100 dark:bg-surface-800 text-surface-600 dark:text-surface-400 hover:bg-surface-200 dark:hover:bg-surface-700'
+            }`}
+          >
+            <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Online</span>
+            <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-black/20 dark:bg-white/20">
+              {online}
+            </span>
+          </button>
+
+          <button
+            onClick={() => setStatusFilter('OFFLINE')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 whitespace-nowrap ${
+              statusFilter === 'OFFLINE'
+                ? 'bg-rose-600 text-white shadow-xs'
+                : 'bg-surface-100 dark:bg-surface-800 text-surface-600 dark:text-surface-400 hover:bg-surface-200 dark:hover:bg-surface-700'
+            }`}
+          >
+            <XCircle className="w-3.5 h-3.5 text-rose-400" />
+            <span>Offline</span>
+            <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-black/20 dark:bg-white/20">
+              {offline}
+            </span>
+          </button>
+
+          <button
+            onClick={() => setStatusFilter('ERRORS')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 whitespace-nowrap ${
+              statusFilter === 'ERRORS'
+                ? 'bg-amber-600 text-white shadow-xs'
+                : 'bg-surface-100 dark:bg-surface-800 text-surface-600 dark:text-surface-400 hover:bg-surface-200 dark:hover:bg-surface-700'
+            }`}
+          >
+            <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+            <span>Errors &amp; Warnings</span>
+            <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-black/20 dark:bg-white/20">
+              {errors}
+            </span>
+          </button>
+        </div>
+
+        {/* Search input */}
+        <div className="relative min-w-[240px]">
+          <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-surface-400" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            placeholder="Search domain, title, error..."
+            className="w-full pl-9 pr-8 py-1.5 rounded-lg border border-surface-200 dark:border-surface-700 bg-surface-50 dark:bg-surface-900 text-xs text-surface-900 dark:text-white placeholder-surface-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          />
+          {searchQuery && (
+            <button
+              onClick={() => setSearchQuery('')}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-surface-400 hover:text-surface-600"
+            >
+              ✕
+            </button>
+          )}
         </div>
       </div>
 
       {/* Websites List with Accordion */}
       <div className="card overflow-hidden">
-        <div className="p-4 border-b border-surface-200 dark:border-surface-800 bg-surface-50/50 dark:bg-surface-900/50 flex items-center justify-between">
-          <h3 className="text-sm font-bold text-surface-900 dark:text-white">
-            Audited Targets &amp; Deep Inspection
-          </h3>
-          <span className="text-xs text-surface-400">
-            Click any row to view DNS records, SSL cert, and full screenshot
-          </span>
+        <div className="p-4 border-b border-surface-200 dark:border-surface-800 bg-surface-50/50 dark:bg-surface-900/50 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-bold text-surface-900 dark:text-white">
+              Audited Targets &amp; Deep Inspection
+            </h3>
+            <span className="text-xs text-surface-400">
+              Showing {filteredResults.length} of {total} targets • Click any row to view DNS records, SSL cert, and full screenshot
+            </span>
+          </div>
+          {(statusFilter !== 'ALL' || searchQuery) && (
+            <button
+              onClick={() => { setStatusFilter('ALL'); setSearchQuery(''); }}
+              className="text-xs text-indigo-600 dark:text-indigo-400 hover:underline text-left"
+            >
+              Reset filters
+            </button>
+          )}
         </div>
 
         <div className="divide-y divide-surface-200 dark:divide-surface-800">
@@ -212,12 +372,12 @@ export default function ScanResults() {
               <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2 text-indigo-500" />
               Loading audit results...
             </div>
-          ) : safeResults.length === 0 ? (
+          ) : filteredResults.length === 0 ? (
             <div className="p-12 text-center text-surface-400 text-xs">
-              No results found for this scan.
+              No results found matching current filter ({statusFilter}{searchQuery ? `, query: "${searchQuery}"` : ''}).
             </div>
           ) : (
-            safeResults.map(item => {
+            filteredResults.map(item => {
               const isExpanded = expandedId === item.id;
               const currentDns = dnsDataMap[item.id] || [];
               const currentSsl = sslDataMap[item.id];
@@ -470,15 +630,28 @@ export default function ScanResults() {
 
                           {/* TAB 3: Visual Screenshot */}
                           {activeTab === 'screenshot' && (
-                            <div>
+                            <div className="space-y-3">
                               {item.screenshot_path ? (
-                                <div className="rounded-xl border border-surface-200 dark:border-surface-800 overflow-hidden bg-slate-900">
-                                  <img
-                                    src={getScreenshotUrl(item.screenshot_path)}
-                                    alt="Visual snapshot"
-                                    className="w-full h-auto max-h-[500px] object-contain"
-                                  />
-                                </div>
+                                <>
+                                  <div className="flex justify-end">
+                                    <a
+                                      href={getScreenshotUrl(item.screenshot_path)}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="text-xs text-indigo-600 dark:text-indigo-400 hover:underline flex items-center gap-1"
+                                    >
+                                      <span>Open full-resolution screenshot</span>
+                                      <ExternalLink className="w-3.5 h-3.5" />
+                                    </a>
+                                  </div>
+                                  <div className="rounded-xl border border-surface-200 dark:border-surface-800 overflow-hidden bg-slate-900 shadow-inner">
+                                    <img
+                                      src={getScreenshotUrl(item.screenshot_path)}
+                                      alt="Visual snapshot"
+                                      className="w-full h-auto max-h-[500px] object-contain"
+                                    />
+                                  </div>
+                                </>
                               ) : (
                                 <p className="text-xs text-surface-400 py-6 text-center">
                                   No visual screenshot captured for this website.

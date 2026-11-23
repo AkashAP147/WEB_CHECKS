@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 from pydantic_settings import BaseSettings
 
@@ -11,7 +12,7 @@ class Settings(BaseSettings):
     database_url: str = f"sqlite:///{PROJECT_ROOT / 'storage' / 'webpulse.db'}"
     screenshots_dir: str = str(PROJECT_ROOT / "storage" / "screenshots")
     reports_dir: str = str(PROJECT_ROOT / "storage" / "reports")
-    max_concurrent_scans: int = 300
+    max_concurrent_scans: int = 150 if sys.platform == "win32" else 300
     max_concurrent_screenshots: int = 20
     scan_timeout: int = 15
     browser_timeout: int = 15000

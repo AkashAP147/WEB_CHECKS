@@ -6,6 +6,7 @@ Generates comprehensive Website Health & DNS Audit PDF reports using ReportLab.
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -25,6 +26,8 @@ from reportlab.platypus import (
     TableStyle,
 )
 from reportlab.pdfgen import canvas
+from backend.app.config import settings
+from backend.app.screenshots.capture import generate_diagnostic_screenshot
 
 
 class NumberedCanvas(canvas.Canvas):
@@ -395,40 +398,54 @@ class PDFReportGenerator:
             website_elements.append(details_table)
             website_elements.append(Spacer(1, 14))
 
-            # Screenshot section if available
-            website_elements.append(Paragraph("Visual Page Rendering (Playwright 1440x900)", self.h2_style))
+            # Screenshot section (guaranteed visual rendering)
+            website_elements.append(Paragraph("Visual Inspection &amp; Page Rendering", self.h2_style))
 
             img_added = False
+            full_img_path = None
             if screenshot_path:
-                # Resolve full path
-                full_img_path = screenshot_path
-                if not os.path.isabs(full_img_path):
-                    # Check relative to workspace or storage
-                    candidates = [
-                        full_img_path,
-                        os.path.join("storage", full_img_path),
-                        os.path.join(".", full_img_path),
-                    ]
-                    for cand in candidates:
-                        if os.path.isfile(cand):
-                            full_img_path = cand
-                            break
+                candidates = [
+                    screenshot_path,
+                    os.path.join(settings.screenshots_dir, os.path.basename(screenshot_path)),
+                    os.path.join(settings.project_root, "storage", screenshot_path),
+                    os.path.join(settings.project_root, screenshot_path),
+                    os.path.join("storage", screenshot_path),
+                    os.path.join(".", screenshot_path),
+                ]
+                for cand in candidates:
+                    if os.path.isfile(cand) and os.path.getsize(cand) > 0:
+                        full_img_path = cand
+                        break
 
-                if os.path.isfile(full_img_path):
-                    try:
-                        # ReportLab Image: fit to width 500 while maintaining aspect ratio
-                        img = Image(full_img_path, width=500, height=280)
-                        website_elements.append(img)
-                        img_added = True
-                    except Exception as img_err:
-                        website_elements.append(
-                            Paragraph(f"<font color='#dc2626'>Unable to render screenshot: {img_err}</font>", self.body_style)
-                        )
+            # If no screenshot was on disk, generate a crisp diagnostic snapshot card on the fly
+            if not full_img_path or not os.path.isfile(full_img_path):
+                gen_filename = f"diag_{scan_id}_{idx}_{int(time.time())}.png"
+                temp_diag_path = os.path.join(settings.screenshots_dir, gen_filename)
+                status_dict = {
+                    "status": status,
+                    "http_status_code": r.get("http_status_code"),
+                    "response_time_ms": r.get("response_time_ms"),
+                    "domain": domain,
+                    "error_message": error_msg,
+                }
+                if generate_diagnostic_screenshot(temp_diag_path, orig_url or domain, status_dict):
+                    full_img_path = temp_diag_path
+
+            if full_img_path and os.path.isfile(full_img_path):
+                try:
+                    # ReportLab Image: fit to width 500 while maintaining aspect ratio
+                    img = Image(full_img_path, width=500, height=280)
+                    website_elements.append(img)
+                    img_added = True
+                except Exception as img_err:
+                    website_elements.append(
+                        Paragraph(f"<font color='#dc2626'>Unable to render screenshot: {img_err}</font>", self.body_style)
+                    )
 
             if not img_added:
-                # Placeholder box
+                # Placeholder box as last-ditch fallback
                 placeholder = Table(
-                    [[Paragraph("<font color='#64748b'>No screenshot captured (site offline, timeout, or blocked)</font>", self.body_style)]],
+                    [[Paragraph("<font color='#64748b'>Visual snapshot unavailable</font>", self.body_style)]],
                     colWidths=[500],
                     rowHeights=[60],
                 )
