@@ -183,7 +183,8 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         async def db_batch_writer():
             nonlocal completed
             last_progress_update = 0
-            while True:
+            stop_requested = False
+            while not stop_requested:
                 item = await db_queue.get()
                 if item is None:
                     db_queue.task_done()
@@ -194,7 +195,8 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                     try:
                         extra = db_queue.get_nowait()
                         if extra is None:
-                            db_queue.put_nowait(None)
+                            stop_requested = True
+                            db_queue.task_done()
                             break
                         batch.append(extra)
                     except asyncio.QueueEmpty:
@@ -261,10 +263,26 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                     await db_queue.put((reused_res, [], None))
                     return
 
-                # 1, 2, 3: Run HTTP, DNS, and SSL in parallel with shared client
+                # 1, 2, 3: Run HTTP, DNS, and SSL in parallel with strict bounded timeouts
                 async def run_http():
                     try:
-                        return await http_scanner.scan_url(raw_url, client=client)
+                        return await asyncio.wait_for(
+                            http_scanner.scan_url(raw_url, client=client),
+                            timeout=15.0,
+                        )
+                    except asyncio.TimeoutError:
+                        return {
+                            "original_url": raw_url,
+                            "final_url": raw_url,
+                            "domain": tentative_domain,
+                            "status": "TIMEOUT",
+                            "http_status_code": None,
+                            "response_time_ms": 15000.0,
+                            "server_info": None,
+                            "website_title": None,
+                            "error_message": "HTTP request timed out after 15 seconds.",
+                            "screenshot_path": None,
+                        }
                     except Exception as exc:
                         return {
                             "original_url": raw_url,
@@ -281,14 +299,20 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
 
                 async def run_dns():
                     try:
-                        res = await dns_analyzer.analyze(tentative_domain)
+                        res = await asyncio.wait_for(
+                            dns_analyzer.analyze(tentative_domain),
+                            timeout=8.0,
+                        )
                         return res.get("records", [])
                     except Exception:
                         return []
 
                 async def run_ssl():
                     try:
-                        return await ssl_checker.check(tentative_domain)
+                        return await asyncio.wait_for(
+                            ssl_checker.check(tentative_domain),
+                            timeout=8.0,
+                        )
                     except Exception:
                         return None
 
@@ -296,7 +320,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                     run_http(), run_dns(), run_ssl()
                 )
 
-                # 4. Smart Screenshot Dispatch
+                # 4. Smart Screenshot Dispatch with bounded timeout
                 screenshot_path = None
                 target_to_capture = http_res.get("final_url") or raw_url
                 status = http_res.get("status")
@@ -304,22 +328,29 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                 if status == "ONLINE":
                     try:
                         async with screenshot_semaphore:
-                            ss_res = await screenshot_capturer.capture(
-                                target_to_capture,
-                                scan_id,
-                                status_info=http_res,
+                            ss_res = await asyncio.wait_for(
+                                screenshot_capturer.capture(
+                                    target_to_capture,
+                                    scan_id,
+                                    status_info=http_res,
+                                ),
+                                timeout=20.0,
                             )
                         if ss_res.get("success"):
                             screenshot_path = ss_res.get("screenshot_path")
                     except Exception as ss_err:
                         logger.debug("Screenshot error for %s: %s", raw_url, ss_err)
 
-                # Fast diagnostic snapshot for offline/error/timeout sites (instant, 0% CPU)
+                # Fast diagnostic snapshot for offline/error/timeout sites
+                # (Offloaded via asyncio.to_thread so Pillow/disk I/O never blocks event loop)
                 if not screenshot_path:
                     try:
                         filename = _build_filename(scan_id, target_to_capture)
                         abs_path = os.path.join(settings.screenshots_dir, filename)
-                        if generate_diagnostic_screenshot(abs_path, target_to_capture, http_res):
+                        created = await asyncio.to_thread(
+                            generate_diagnostic_screenshot, abs_path, target_to_capture, http_res
+                        )
+                        if created:
                             screenshot_path = f"screenshots/{filename}"
                     except Exception:
                         pass
@@ -346,10 +377,19 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         ) as shared_client:
             await asyncio.gather(*[scan_single_url(u, shared_client) for u in urls])
 
-        # Signal DB writer that all scanning is complete and wait for final flush
-        await db_queue.put(None)
-        if writer_task:
-            await writer_task
+        # Signal DB writer that all scanning is complete and wait for final flush with timeout
+        try:
+            await asyncio.wait_for(db_queue.put(None), timeout=5.0)
+        except Exception:
+            try:
+                db_queue.put_nowait(None)
+            except Exception:
+                pass
+        if writer_task and not writer_task.done():
+            try:
+                await asyncio.wait_for(writer_task, timeout=10.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                writer_task.cancel()
 
         # Mark scan completed in database
         async with get_db() as db:
@@ -362,9 +402,15 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
     except asyncio.CancelledError:
         logger.info("Scan %s cancelled by user.", scan_id)
         try:
-            await db_queue.put(None)
-            if writer_task:
-                await writer_task
+            db_queue.put_nowait(None)
+        except Exception:
+            pass
+        if writer_task and not writer_task.done():
+            try:
+                await asyncio.wait_for(writer_task, timeout=5.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                writer_task.cancel()
+        try:
             async with get_db() as db:
                 await update_scan_status(db, scan_id, "cancelled", completed_urls=completed)
         except Exception:
@@ -372,9 +418,15 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
     except Exception as exc:
         logger.error("Scan %s failed with unexpected exception: %s", scan_id, exc, exc_info=True)
         try:
-            await db_queue.put(None)
-            if writer_task:
-                await writer_task
+            db_queue.put_nowait(None)
+        except Exception:
+            pass
+        if writer_task and not writer_task.done():
+            try:
+                await asyncio.wait_for(writer_task, timeout=5.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                writer_task.cancel()
+        try:
             async with get_db() as db:
                 await update_scan_status(db, scan_id, "failed", completed_urls=completed)
         except Exception:
@@ -382,9 +434,9 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
     finally:
         if screenshot_capturer:
             try:
-                await screenshot_capturer.cleanup()
-            except Exception:
-                pass
+                await asyncio.wait_for(screenshot_capturer.cleanup(), timeout=10.0)
+            except Exception as ss_clean_err:
+                logger.debug("Screenshot cleanup error for %s: %s", scan_id, ss_clean_err)
         _running_tasks.pop(scan_id, None)
 
 
