@@ -122,7 +122,9 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
     completed = 0
     total = len(urls)
     db_queue: asyncio.Queue = asyncio.Queue(maxsize=4000)
+    screenshot_queue: asyncio.Queue = asyncio.Queue()
     writer_task: Optional[asyncio.Task] = None
+    ss_worker_tasks: List[asyncio.Task] = []
     screenshot_capturer: Optional[ScreenshotCapture] = None
 
     try:
@@ -144,53 +146,137 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         default_concurrency = 120 if sys.platform == "win32" else 150
         concurrency_limit = min(settings.max_concurrent_scans, default_concurrency)
         url_semaphore = asyncio.Semaphore(concurrency_limit)
-        screenshot_semaphore = asyncio.Semaphore(min(settings.max_concurrent_screenshots or 15, 15))
 
         # -----------------------------------------------------------------------
-        # Producer-Consumer DB Batch Writer
+        # Producer-Consumer High-Speed DB Batch Writer
+        # Uses a single persistent database connection with WAL & synchronous=NORMAL
         # -----------------------------------------------------------------------
         async def db_batch_writer():
             nonlocal completed
             stop_requested = False
-            while not stop_requested:
-                item = await db_queue.get()
-                if item is None:
-                    db_queue.task_done()
-                    break
 
-                batch = [item]
-                while len(batch) < 10:
-                    try:
-                        extra = db_queue.get_nowait()
-                        if extra is None:
-                            stop_requested = True
-                            db_queue.task_done()
-                            break
-                        batch.append(extra)
-                    except asyncio.QueueEmpty:
+            async with get_db() as db:
+                await db.execute("PRAGMA synchronous = NORMAL;")
+                await db.execute("PRAGMA cache_size = 10000;")
+
+                while not stop_requested:
+                    item = await db_queue.get()
+                    if item is None:
+                        db_queue.task_done()
                         break
 
-                try:
-                    async with get_db() as db:
-                        for h_res, d_recs, s_dat in batch:
-                            res_id = await save_scan_result(db, scan_id=scan_id, result_data=h_res, commit=False)
-                            if d_recs:
-                                await save_dns_records(db, scan_result_id=res_id, records_list=d_recs, commit=False)
-                            if s_dat:
-                                await save_ssl_details(db, scan_result_id=res_id, ssl_data=s_dat, commit=False)
-                            completed += 1
+                    batch = [item]
+                    while len(batch) < 30:
+                        try:
+                            extra = db_queue.get_nowait()
+                            if extra is None:
+                                stop_requested = True
+                                db_queue.task_done()
+                                break
+                            batch.append(extra)
+                        except asyncio.QueueEmpty:
+                            break
 
-                        # Single fast atomic commit for all 50 items in the batch
+                    try:
+                        has_inserts = False
+                        for entry in batch:
+                            action = entry[0]
+                            if action == "INSERT":
+                                _, h_res, d_recs, s_dat = entry
+                                res_id = await save_scan_result(db, scan_id=scan_id, result_data=h_res, commit=False)
+                                if d_recs:
+                                    await save_dns_records(db, scan_result_id=res_id, records_list=d_recs, commit=False)
+                                if s_dat:
+                                    await save_ssl_details(db, scan_result_id=res_id, ssl_data=s_dat, commit=False)
+                                completed += 1
+                                has_inserts = True
+
+                            elif action == "UPDATE_SCREENSHOT":
+                                _, orig_url, final_url, ss_data = entry
+                                sc_path = ss_data.get("screenshot_path")
+                                new_title = ss_data.get("title")
+                                browser_captured = ss_data.get("browser_captured", False)
+                                status_code = ss_data.get("status_code")
+
+                                if browser_captured and sc_path:
+                                    if status_code and status_code >= 400:
+                                        new_status = "HTTP_ERROR"
+                                        err_msg = f"HTTP {status_code}: server returned client/server error."
+                                    else:
+                                        new_status = "ONLINE"
+                                        err_msg = None
+
+                                    await db.execute(
+                                        """
+                                        UPDATE scan_results
+                                        SET screenshot_path = ?,
+                                            website_title = CASE WHEN website_title IS NULL OR website_title = original_url OR website_title = '' THEN COALESCE(?, website_title) ELSE website_title END,
+                                            status = ?,
+                                            http_status_code = COALESCE(?, http_status_code),
+                                            error_message = ?
+                                        WHERE scan_id = ? AND (original_url = ? OR final_url = ?)
+                                        """,
+                                        (sc_path, new_title, new_status, status_code, err_msg, scan_id, orig_url, final_url or orig_url),
+                                    )
+                                elif sc_path:
+                                    await db.execute(
+                                        """
+                                        UPDATE scan_results
+                                        SET screenshot_path = ?,
+                                            website_title = CASE WHEN website_title IS NULL OR website_title = original_url OR website_title = '' THEN COALESCE(?, website_title) ELSE website_title END
+                                        WHERE scan_id = ? AND (original_url = ? OR final_url = ?)
+                                        """,
+                                        (sc_path, new_title, scan_id, orig_url, final_url or orig_url),
+                                    )
+
+                        # Single fast atomic commit for both results and progress
+                        if has_inserts and total:
+                            progress_pct = round((completed / total) * 100, 2)
+                            await db.execute(
+                                """
+                                UPDATE scans
+                                   SET status = 'running', completed_urls = ?, progress_pct = ?
+                                 WHERE id = ?
+                                """,
+                                (completed, progress_pct, scan_id),
+                            )
+
                         await db.commit()
-                        # Immediate scan progress update on every batch write
-                        await update_scan_status(db, scan_id, "running", completed_urls=completed)
-                except Exception as write_err:
-                    logger.error("DB batch write error: %s", write_err)
-                finally:
-                    for _ in batch:
-                        db_queue.task_done()
+
+                    except Exception as write_err:
+                        logger.error("DB batch write error: %s", write_err)
+                    finally:
+                        for _ in batch:
+                            db_queue.task_done()
 
         writer_task = asyncio.create_task(db_batch_writer())
+
+        # -----------------------------------------------------------------------
+        # Asynchronous Screenshot Worker Pool
+        # Continuously takes screenshots in the background without blocking scan/DB
+        # -----------------------------------------------------------------------
+        async def screenshot_worker():
+            while True:
+                task = await screenshot_queue.get()
+                if task is None:
+                    screenshot_queue.task_done()
+                    break
+                raw_url, target_to_capture, http_res = task
+                try:
+                    if scan_id in _running_tasks and screenshot_capturer:
+                        ss_res = await screenshot_capturer.capture(
+                            target_to_capture,
+                            scan_id,
+                            status_info=http_res,
+                        )
+                        await db_queue.put(("UPDATE_SCREENSHOT", raw_url, target_to_capture, ss_res))
+                except Exception as ss_err:
+                    logger.debug("Screenshot worker error for %s: %s", raw_url, ss_err)
+                finally:
+                    screenshot_queue.task_done()
+
+        num_ss_workers = min(settings.max_concurrent_screenshots or 15, 15)
+        ss_worker_tasks = [asyncio.create_task(screenshot_worker()) for _ in range(num_ss_workers)]
 
         # -----------------------------------------------------------------------
         # Worker Coroutine
@@ -289,46 +375,12 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
 
             # url_semaphore IS RELEASED! Other network workers immediately scan the next URLs!
 
-            # --- PHASE 2: REAL HEADLESS BROWSER SCREENSHOT GENERATION ---
-            try:
-                async with screenshot_semaphore:
-                    ss_res = await screenshot_capturer.capture(
-                        target_to_capture,
-                        scan_id,
-                        status_info=http_res,
-                    )
-                http_res["screenshot_path"] = ss_res.get("screenshot_path")
-                if ss_res.get("title") and (not http_res.get("website_title") or http_res.get("website_title") == raw_url):
-                    http_res["website_title"] = ss_res["title"]
-                if ss_res.get("final_url") and not http_res.get("final_url"):
-                    http_res["final_url"] = ss_res["final_url"]
+            # --- PHASE 1 FINISHED: PUSH RESULT TO DB QUEUE INSTANTLY ---
+            # DB writer immediately inserts row and increments scan progress (sub-second UI updates)
+            await db_queue.put(("INSERT", http_res, dns_records, ssl_data))
 
-                # If Chromium successfully loaded and rendered the webpage:
-                # The website is PROVABLY active and reachable (NEVER mark as TIMEOUT or OFFLINE)!
-                if ss_res.get("browser_captured"):
-                    sc_code = ss_res.get("status_code") or 200
-                    if not http_res.get("http_status_code") or http_res.get("http_status_code") == 0:
-                        http_res["http_status_code"] = sc_code
-
-                    if sc_code >= 400:
-                        http_res["status"] = "HTTP_ERROR"
-                        http_res["error_message"] = f"HTTP {sc_code}: server returned client/server error."
-                    else:
-                        http_res["status"] = "ONLINE"
-                        http_res["error_message"] = None
-
-                    # If DNS / SSL were skipped due to initial transient socket timeout, run them now:
-                    if not dns_records and not ssl_data:
-                        try:
-                            dns_records, ssl_data = await asyncio.gather(run_dns(), run_ssl())
-                        except Exception:
-                            pass
-            except Exception as ss_err:
-                logger.debug("Screenshot capture error for %s: %s", raw_url, ss_err)
-                http_res["screenshot_path"] = None
-
-            # Push to DB batch queue (non-blocking instant hand-off)
-            await db_queue.put((http_res, dns_records, ssl_data))
+            # --- QUEUE TO ASYNC BACKGROUND SCREENSHOT WORKERS ---
+            await screenshot_queue.put((raw_url, target_to_capture, http_res))
 
         # Main Scan Execution Loop with Shared High-Throughput Persistent HTTP Client
         limits = httpx.Limits(max_connections=600, max_keepalive_connections=300)
@@ -348,6 +400,22 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
             },
         ) as shared_client:
             await asyncio.gather(*[scan_single_url(u, shared_client) for u in urls])
+
+        # Wait for all background screenshots to finish (with generous 60s timeout)
+        try:
+            await asyncio.wait_for(screenshot_queue.join(), timeout=60.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            logger.info("Screenshot queue drained or reached timeout.")
+
+        # Stop screenshot workers
+        for _ in ss_worker_tasks:
+            try:
+                screenshot_queue.put_nowait(None)
+            except Exception:
+                pass
+        for t in ss_worker_tasks:
+            if not t.done():
+                t.cancel()
 
         # Signal DB writer that all scanning is complete and wait for final flush with timeout
         try:
@@ -373,6 +441,9 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
 
     except asyncio.CancelledError:
         logger.info("Scan %s cancelled by user.", scan_id)
+        for t in ss_worker_tasks:
+            if not t.done():
+                t.cancel()
         try:
             db_queue.put_nowait(None)
         except Exception:
@@ -389,6 +460,9 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
             pass
     except Exception as exc:
         logger.error("Scan %s failed with unexpected exception: %s", scan_id, exc, exc_info=True)
+        for t in ss_worker_tasks:
+            if not t.done():
+                t.cancel()
         try:
             db_queue.put_nowait(None)
         except Exception:
