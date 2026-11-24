@@ -102,7 +102,7 @@ export default function History() {
       } catch {
         // quiet poll failure
       }
-    }, 2500);
+    }, 1000);
 
     return () => clearInterval(interval);
   }, [fetchHistory, page, searchTerm, statusFilter]);

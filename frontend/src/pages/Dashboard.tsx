@@ -55,6 +55,16 @@ export default function Dashboard() {
 
   useEffect(() => {
     fetchStats();
+    // Real-time polling for dashboard stats every 2.0 seconds
+    const interval = setInterval(async () => {
+      try {
+        const data = await scanApi.getDashboard();
+        setStats(data);
+      } catch {
+        // quiet poll
+      }
+    }, 2000);
+    return () => clearInterval(interval);
   }, []);
 
   // Compute charts

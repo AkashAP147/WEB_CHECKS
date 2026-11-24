@@ -140,8 +140,8 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         _ssl_memory_cache: Dict[str, dict | None] = {}
 
         # Concurrency control:
-        # URL network worker concurrency: 75 on Windows (100 on Linux/Colab) for high stability & speed
-        default_concurrency = 75 if sys.platform == "win32" else 100
+        # URL network worker concurrency: 120 on Windows (150 on Linux/Colab) for ultra-fast throughput
+        default_concurrency = 120 if sys.platform == "win32" else 150
         concurrency_limit = min(settings.max_concurrent_scans, default_concurrency)
         url_semaphore = asyncio.Semaphore(concurrency_limit)
 
@@ -158,7 +158,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                     break
 
                 batch = [item]
-                while len(batch) < 25:
+                while len(batch) < 10:
                     try:
                         extra = db_queue.get_nowait()
                         if extra is None:
@@ -209,7 +209,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                 try:
                     return await asyncio.wait_for(
                         http_scanner.scan_url(raw_url, client=client),
-                        timeout=12.0,
+                        timeout=8.0,
                     )
                 except asyncio.TimeoutError:
                     return {
@@ -218,7 +218,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                         "domain": tentative_domain,
                         "status": "TIMEOUT",
                         "http_status_code": None,
-                        "response_time_ms": 12000.0,
+                        "response_time_ms": 8000.0,
                         "server_info": None,
                         "website_title": None,
                         "error_message": "Host unreachable (connection timed out).",
@@ -304,10 +304,10 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
             await db_queue.put((http_res, dns_records, ssl_data))
 
         # Main Scan Execution Loop with Shared High-Throughput Persistent HTTP Client
-        limits = httpx.Limits(max_connections=500, max_keepalive_connections=250)
+        limits = httpx.Limits(max_connections=600, max_keepalive_connections=300)
         async with httpx.AsyncClient(
             limits=limits,
-            timeout=httpx.Timeout(connect=5.0, read=8.0, write=5.0, pool=None),
+            timeout=httpx.Timeout(connect=3.0, read=5.0, write=3.0, pool=None),
             follow_redirects=False,
             verify=False,
             headers={

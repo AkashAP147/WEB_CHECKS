@@ -42,7 +42,7 @@ STATUS_SSRF_BLOCKED = "SSRF_BLOCKED"
 MAX_REDIRECTS = 5
 
 # Default request timeout in seconds (optimized for fast parallel discovery).
-DEFAULT_TIMEOUT = 7.0
+DEFAULT_TIMEOUT = 5.0
 
 # Regexes to pull titles from HTML documents.
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)

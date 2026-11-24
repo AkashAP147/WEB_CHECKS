@@ -50,7 +50,7 @@ export function useScan() {
         } catch {
           // Keep polling quietly
         }
-      }, 1500);
+      }, 600);
     },
     [stopPolling]
   );

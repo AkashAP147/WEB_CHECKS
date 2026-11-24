@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Search,
@@ -165,6 +165,18 @@ export default function Scanner() {
       return matchesSearch && matchesStatus;
     });
   }, [results, searchTerm, statusFilter]);
+
+  const [tablePage, setTablePage] = useState<number>(1);
+  const [tablePageSize, setTablePageSize] = useState<number>(50);
+
+  useEffect(() => {
+    setTablePage(1);
+  }, [searchTerm, statusFilter]);
+
+  const totalTablePages = Math.max(1, Math.ceil(filteredResults.length / tablePageSize));
+  const validTablePage = Math.min(tablePage, totalTablePages);
+  const startTableIndex = (validTablePage - 1) * tablePageSize;
+  const paginatedTableResults = filteredResults.slice(startTableIndex, startTableIndex + tablePageSize);
 
   const isScanning = scan?.status === 'running' || scan?.status === 'pending';
   const progressPct =
@@ -548,7 +560,7 @@ export default function Scanner() {
                     </td>
                   </tr>
                 ) : (
-                  filteredResults.map(item => {
+                  paginatedTableResults.map(item => {
                     const isOnline = item.status === 'ONLINE';
                     return (
                       <tr
@@ -658,6 +670,62 @@ export default function Scanner() {
               </tbody>
             </table>
           </div>
+
+          {/* Pagination Controls */}
+          {filteredResults.length > tablePageSize && (
+            <div className="p-4 border-t border-surface-200 dark:border-surface-800 bg-surface-50/50 dark:bg-surface-900/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-xs text-surface-500">
+                <span>Rows per page:</span>
+                <select
+                  value={tablePageSize}
+                  onChange={e => { setTablePageSize(Number(e.target.value)); setTablePage(1); }}
+                  className="bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded px-2 py-1 text-xs text-surface-900 dark:text-white"
+                >
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                  <option value={200}>200</option>
+                </select>
+                <span>
+                  Showing {startTableIndex + 1}–{Math.min(startTableIndex + tablePageSize, filteredResults.length)} of {filteredResults.length}
+                </span>
+              </div>
+
+              <div className="flex items-center gap-1.5 self-end sm:self-auto">
+                <button
+                  onClick={() => setTablePage(1)}
+                  disabled={validTablePage <= 1}
+                  className="px-2.5 py-1 text-xs rounded border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 disabled:opacity-40 hover:bg-surface-50 dark:hover:bg-surface-700 text-surface-700 dark:text-surface-300"
+                >
+                  « First
+                </button>
+                <button
+                  onClick={() => setTablePage(prev => Math.max(1, prev - 1))}
+                  disabled={validTablePage <= 1}
+                  className="px-2.5 py-1 text-xs rounded border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 disabled:opacity-40 hover:bg-surface-50 dark:hover:bg-surface-700 text-surface-700 dark:text-surface-300"
+                >
+                  ‹ Prev
+                </button>
+                <span className="text-xs px-2 text-surface-600 dark:text-surface-400 font-medium">
+                  Page {validTablePage} of {totalTablePages}
+                </span>
+                <button
+                  onClick={() => setTablePage(prev => Math.min(totalTablePages, prev + 1))}
+                  disabled={validTablePage >= totalTablePages}
+                  className="px-2.5 py-1 text-xs rounded border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 disabled:opacity-40 hover:bg-surface-50 dark:hover:bg-surface-700 text-surface-700 dark:text-surface-300"
+                >
+                  Next ›
+                </button>
+                <button
+                  onClick={() => setTablePage(totalTablePages)}
+                  disabled={validTablePage >= totalTablePages}
+                  className="px-2.5 py-1 text-xs rounded border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 disabled:opacity-40 hover:bg-surface-50 dark:hover:bg-surface-700 text-surface-700 dark:text-surface-300"
+                >
+                  Last »
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
