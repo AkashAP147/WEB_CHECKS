@@ -183,7 +183,7 @@ def resolve_and_check(url: str) -> tuple[bool, str | None]:
 def validate_redirect_target(url: str) -> bool:
     """Revalidate a URL encountered during redirect following.
 
-    Combines :func:`validate_url` parsing with :func:`resolve_and_check`.
+    Checks syntax and ensures the target does not point to internal metadata/private IPs.
     Returns ``True`` if the redirect target is safe.
     """
     try:
@@ -191,8 +191,7 @@ def validate_redirect_target(url: str) -> bool:
     except ValueError:
         return False
 
-    is_safe, _ = resolve_and_check(normalized)
-    return is_safe
+    return is_safe_url(normalized)
 
 
 # Regex to match valid domains or full URLs anywhere inside text

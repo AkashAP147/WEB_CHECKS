@@ -105,7 +105,7 @@ class HttpScanner:
             url = validate_url(url)
             result["original_url"] = url
         except ValueError as exc:
-            result["status"] = STATUS_BLOCKED
+            result["status"] = STATUS_OFFLINE
             result["error_message"] = f"Invalid URL: {exc}"
             return result
 
@@ -127,50 +127,58 @@ class HttpScanner:
         response: httpx.Response | None = None
         start = time.monotonic()
 
+        tried_http_fallback = False
         async def _execute_with_client(http_client: httpx.AsyncClient):
-            nonlocal response, current_url
+            nonlocal response, current_url, tried_http_fallback
             for _ in range(MAX_REDIRECTS + 1):
-                async with http_client.stream("GET", current_url) as resp:
-                    if resp.is_redirect:
-                        redirect_location = resp.headers.get("location")
-                        if not redirect_location:
-                            response = resp
-                            break
-
-                        # Resolve relative redirects.
-                        redirect_location = str(resp.url.join(redirect_location))
-
-                        # SSRF check on redirect target.
-                        if not validate_redirect_target(redirect_location):
-                            elapsed = (time.monotonic() - start) * 1000
-                            result["response_time_ms"] = round(elapsed, 2)
-                            result["status"] = STATUS_SSRF_BLOCKED
-                            result["error_message"] = f"Redirect target blocked (SSRF): {redirect_location}"
-                            result["redirect_chain"] = redirect_chain
-                            result["is_redirect"] = bool(redirect_chain)
-                            return False
-
-                        redirect_chain.append(current_url)
-                        current_url = redirect_location
-                        continue
-                    else:
-                        # Fast content reading: read up to 32KB of HTML for <title> and headers
-                        # Prevents downloading huge multi-megabyte media/assets
-                        body_chunks = []
-                        total_bytes = 0
-                        async for chunk in resp.aiter_bytes():
-                            body_chunks.append(chunk)
-                            total_bytes += len(chunk)
-                            if total_bytes >= 32768:
+                try:
+                    async with http_client.stream("GET", current_url) as resp:
+                        if resp.is_redirect:
+                            redirect_location = resp.headers.get("location")
+                            if not redirect_location:
+                                response = resp
                                 break
-                        body_bytes = b"".join(body_chunks)
-                        response = httpx.Response(
-                            status_code=resp.status_code,
-                            headers=resp.headers,
-                            content=body_bytes,
-                            request=resp.request,
-                        )
-                        break
+
+                            # Resolve relative redirects.
+                            redirect_location = str(resp.url.join(redirect_location))
+
+                            # SSRF check on redirect target.
+                            if not validate_redirect_target(redirect_location):
+                                elapsed = (time.monotonic() - start) * 1000
+                                result["response_time_ms"] = round(elapsed, 2)
+                                result["status"] = STATUS_SSRF_BLOCKED
+                                result["error_message"] = f"Redirect target blocked (SSRF): {redirect_location}"
+                                result["redirect_chain"] = redirect_chain
+                                result["is_redirect"] = bool(redirect_chain)
+                                return False
+
+                            redirect_chain.append(current_url)
+                            current_url = redirect_location
+                            continue
+                        else:
+                            # Fast content reading: read up to 32KB of HTML for <title> and headers
+                            # Prevents downloading huge multi-megabyte media/assets
+                            body_chunks = []
+                            total_bytes = 0
+                            async for chunk in resp.aiter_bytes():
+                                body_chunks.append(chunk)
+                                total_bytes += len(chunk)
+                                if total_bytes >= 32768:
+                                    break
+                            body_bytes = b"".join(body_chunks)
+                            response = httpx.Response(
+                                status_code=resp.status_code,
+                                headers=resp.headers,
+                                content=body_bytes,
+                                request=resp.request,
+                            )
+                            break
+                except (httpx.ConnectError, httpx.RequestError, Exception) as net_err:
+                    if not tried_http_fallback and current_url.startswith("https://"):
+                        tried_http_fallback = True
+                        current_url = current_url.replace("https://", "http://", 1)
+                        continue
+                    raise net_err
             return True
 
         try:
@@ -181,7 +189,7 @@ class HttpScanner:
                 async with httpx.AsyncClient(
                     timeout=httpx.Timeout(self.timeout),
                     follow_redirects=False,
-                    verify=True,
+                    verify=False,
                     headers={"User-Agent": _USER_AGENT},
                 ) as local_client:
                     if not await _execute_with_client(local_client):
@@ -275,7 +283,12 @@ def _classify_exception(exc: Exception) -> tuple[str, str]:
     exc_type = type(exc).__name__
     exc_msg = str(exc)
 
-    # DNS failure.
+    if isinstance(exc, (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout)):
+        return STATUS_TIMEOUT, f"Connection timed out ({exc_type})"
+
+    if isinstance(exc, httpx.TimeoutException):
+        return STATUS_TIMEOUT, f"Request timed out: {exc_msg}"
+
     if isinstance(exc, httpx.ConnectError):
         lower = exc_msg.lower()
         if "name or service not known" in lower or "getaddrinfo failed" in lower or "nodename nor servname" in lower:
@@ -284,14 +297,11 @@ def _classify_exception(exc: Exception) -> tuple[str, str]:
             return STATUS_OFFLINE, f"Connection refused/reset: {exc_msg}"
         return STATUS_OFFLINE, f"Connection error: {exc_msg}"
 
-    if isinstance(exc, httpx.ConnectTimeout):
-        return STATUS_TIMEOUT, f"Connection timed out: {exc_msg}"
+    if "ssl" in exc_type.lower() or "certificate" in exc_msg.lower():
+        return STATUS_SSL_ERROR, f"SSL/TLS error: {exc_msg}"
 
-    if isinstance(exc, httpx.ReadTimeout):
-        return STATUS_TIMEOUT, f"Read timed out: {exc_msg}"
-
-    # Catch-all.
-    return STATUS_BLOCKED, f"{exc_type}: {exc_msg}"
+    # Catch-all: general network, protocol, stream, or connection errors are OFFLINE, never BLOCKED!
+    return STATUS_OFFLINE, f"{exc_type}: {exc_msg}"
 
 
 def _get_ssl_exception():

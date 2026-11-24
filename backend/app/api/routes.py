@@ -398,9 +398,9 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         limits = httpx.Limits(max_connections=500, max_keepalive_connections=250)
         async with httpx.AsyncClient(
             limits=limits,
-            timeout=httpx.Timeout(connect=6.0, read=8.0, write=6.0, pool=15.0),
+            timeout=httpx.Timeout(connect=8.0, read=8.0, write=8.0, pool=None),
             follow_redirects=False,
-            verify=True,
+            verify=False,
             headers={
                 "User-Agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
