@@ -256,28 +256,37 @@ def _sync_capture_worker(
                     except Exception:
                         pass
 
-                    # Resilient navigation: ensure protocol, commit fast, then hydrate DOM
+                    # Resilient navigation: ensure protocol, navigate with proper DOM hydration
                     navigated = False
                     target_url = url if "://" in url else f"https://{url}"
                     try:
-                        page.goto(target_url, wait_until="commit", timeout=15000)
+                        page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
                         navigated = True
-                    except Exception:
-                        if target_url.startswith("https://"):
+                    except Exception as nav_err:
+                        # Check if page actually loaded some content despite timeout/network error
+                        try:
+                            content = page.content()
+                            if content and len(content) > 300:
+                                navigated = True
+                        except Exception:
+                            pass
+
+                        if not navigated and target_url.startswith("https://"):
                             try:
                                 http_url = target_url.replace("https://", "http://", 1)
-                                page.goto(http_url, wait_until="commit", timeout=10000)
+                                page.goto(http_url, wait_until="domcontentloaded", timeout=12000)
                                 navigated = True
                             except Exception:
-                                pass
+                                try:
+                                    content = page.content()
+                                    if content and len(content) > 300:
+                                        navigated = True
+                                except Exception:
+                                    pass
 
                     if navigated:
                         try:
-                            page.wait_for_load_state("domcontentloaded", timeout=4000)
-                        except Exception:
-                            pass
-                        try:
-                            page.wait_for_timeout(500)
+                            page.wait_for_timeout(1000)
                         except Exception:
                             pass
                         page.screenshot(path=abs_path, full_page=False, type="png")

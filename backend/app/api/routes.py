@@ -173,8 +173,8 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         _ssl_memory_cache: Dict[str, dict | None] = {}
 
         # Concurrency control:
-        # 1. URL network worker concurrency: 100 on Windows (150 on Linux/Colab)
-        default_concurrency = 100 if sys.platform == "win32" else 150
+        # 1. URL network worker concurrency: 35 on Windows (50 on Linux/Colab) to prevent socket/DNS saturation
+        default_concurrency = 35 if sys.platform == "win32" else 50
         concurrency_limit = min(settings.max_concurrent_scans, default_concurrency)
         url_semaphore = asyncio.Semaphore(concurrency_limit)
 
@@ -195,7 +195,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                     break
 
                 batch = [item]
-                while len(batch) < 50:
+                while len(batch) < 25:
                     try:
                         extra = db_queue.get_nowait()
                         if extra is None:
@@ -268,7 +268,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                 try:
                     return await asyncio.wait_for(
                         http_scanner.scan_url(raw_url, client=client),
-                        timeout=8.0,
+                        timeout=15.0,
                     )
                 except asyncio.TimeoutError:
                     return {
@@ -277,10 +277,10 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                         "domain": tentative_domain,
                         "status": "TIMEOUT",
                         "http_status_code": None,
-                        "response_time_ms": 8000.0,
+                        "response_time_ms": 15000.0,
                         "server_info": None,
                         "website_title": None,
-                        "error_message": "HTTP request timed out after 8 seconds.",
+                        "error_message": "HTTP request timed out after 15 seconds.",
                         "screenshot_path": None,
                     }
                 except Exception as exc:
@@ -303,7 +303,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                 try:
                     res = await asyncio.wait_for(
                         dns_analyzer.analyze(tentative_domain),
-                        timeout=3.5,
+                        timeout=5.0,
                     )
                     recs = res.get("records", [])
                     _dns_memory_cache[tentative_domain] = recs
@@ -317,7 +317,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                 try:
                     res = await asyncio.wait_for(
                         ssl_checker.check(tentative_domain),
-                        timeout=3.5,
+                        timeout=5.0,
                     )
                     _ssl_memory_cache[tentative_domain] = res
                     return res
@@ -357,7 +357,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                 # For ONLINE sites: run DNS and SSL concurrently
                 dns_records, ssl_data = await asyncio.gather(run_dns(), run_ssl())
 
-            # url_semaphore IS RELEASED! Other 100+ network workers immediately scan the next URLs!
+            # url_semaphore IS RELEASED! Other network workers immediately scan the next URLs!
 
             # --- PHASE 2: PARALLEL SCREENSHOT DISPATCH (Independent semaphore) ---
             screenshot_path = None
@@ -369,7 +369,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                             scan_id,
                             status_info=http_res,
                         ),
-                        timeout=20.0,
+                        timeout=30.0,
                     )
                 if ss_res.get("success"):
                     screenshot_path = ss_res.get("screenshot_path")
@@ -381,10 +381,14 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                 try:
                     filename = _build_filename(scan_id, target_to_capture)
                     abs_path = os.path.join(settings.screenshots_dir, filename)
-                    created = await asyncio.to_thread(
-                        generate_diagnostic_screenshot, abs_path, target_to_capture, http_res
-                    )
-                    if created:
+                    # Only create diagnostic image if a valid screenshot wasn't already written
+                    if not os.path.exists(abs_path) or os.path.getsize(abs_path) == 0:
+                        created = await asyncio.to_thread(
+                            generate_diagnostic_screenshot, abs_path, target_to_capture, http_res
+                        )
+                        if created:
+                            screenshot_path = f"screenshots/{filename}"
+                    else:
                         screenshot_path = f"screenshots/{filename}"
                 except Exception:
                     pass
@@ -398,7 +402,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         limits = httpx.Limits(max_connections=500, max_keepalive_connections=250)
         async with httpx.AsyncClient(
             limits=limits,
-            timeout=httpx.Timeout(connect=8.0, read=8.0, write=8.0, pool=None),
+            timeout=httpx.Timeout(connect=10.0, read=12.0, write=10.0, pool=None),
             follow_redirects=False,
             verify=False,
             headers={

@@ -36,8 +36,8 @@ STATUS_SSRF_BLOCKED = "SSRF_BLOCKED"
 # Max redirects we are willing to follow manually.
 MAX_REDIRECTS = 5
 
-# Default request timeout in seconds (optimized for fast parallel scanning).
-DEFAULT_TIMEOUT = 8.0
+# Default request timeout in seconds (balanced for accuracy and speed).
+DEFAULT_TIMEOUT = 12.0
 
 # Regex to pull <title> from an HTML document.
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
@@ -132,53 +132,40 @@ class HttpScanner:
             nonlocal response, current_url, tried_http_fallback
             for _ in range(MAX_REDIRECTS + 1):
                 try:
-                    async with http_client.stream("GET", current_url) as resp:
-                        if resp.is_redirect:
-                            redirect_location = resp.headers.get("location")
-                            if not redirect_location:
-                                response = resp
-                                break
-
-                            # Resolve relative redirects.
-                            redirect_location = str(resp.url.join(redirect_location))
-
-                            # SSRF check on redirect target.
-                            if not validate_redirect_target(redirect_location):
-                                elapsed = (time.monotonic() - start) * 1000
-                                result["response_time_ms"] = round(elapsed, 2)
-                                result["status"] = STATUS_SSRF_BLOCKED
-                                result["error_message"] = f"Redirect target blocked (SSRF): {redirect_location}"
-                                result["redirect_chain"] = redirect_chain
-                                result["is_redirect"] = bool(redirect_chain)
-                                return False
-
-                            redirect_chain.append(current_url)
-                            current_url = redirect_location
-                            continue
-                        else:
-                            # Fast content reading: read up to 32KB of HTML for <title> and headers
-                            # Prevents downloading huge multi-megabyte media/assets
-                            body_chunks = []
-                            total_bytes = 0
-                            async for chunk in resp.aiter_bytes():
-                                body_chunks.append(chunk)
-                                total_bytes += len(chunk)
-                                if total_bytes >= 32768:
-                                    break
-                            body_bytes = b"".join(body_chunks)
-                            response = httpx.Response(
-                                status_code=resp.status_code,
-                                headers=resp.headers,
-                                content=body_bytes,
-                                request=resp.request,
-                            )
-                            break
-                except (httpx.ConnectError, httpx.RequestError, Exception) as net_err:
+                    response = await http_client.get(current_url)
+                except (httpx.ConnectError, httpx.RequestError, ssl.SSLError) as net_err:
                     if not tried_http_fallback and current_url.startswith("https://"):
                         tried_http_fallback = True
                         current_url = current_url.replace("https://", "http://", 1)
-                        continue
-                    raise net_err
+                        try:
+                            response = await http_client.get(current_url)
+                        except Exception:
+                            raise net_err
+                    else:
+                        raise net_err
+
+                if response.is_redirect:
+                    redirect_location = response.headers.get("location")
+                    if not redirect_location:
+                        break
+
+                    # Resolve relative redirects.
+                    redirect_location = str(response.url.join(redirect_location))
+
+                    # SSRF check on redirect target.
+                    if not validate_redirect_target(redirect_location):
+                        elapsed = (time.monotonic() - start) * 1000
+                        result["response_time_ms"] = round(elapsed, 2)
+                        result["status"] = STATUS_SSRF_BLOCKED
+                        result["error_message"] = f"Redirect target blocked (SSRF): {redirect_location}"
+                        result["redirect_chain"] = redirect_chain
+                        result["is_redirect"] = bool(redirect_chain)
+                        return False
+
+                    redirect_chain.append(current_url)
+                    current_url = redirect_location
+                else:
+                    break
             return True
 
         try:
