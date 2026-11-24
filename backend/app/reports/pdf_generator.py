@@ -329,65 +329,66 @@ class PDFReportGenerator:
         story.append(Spacer(1, 20))
 
         # =====================================================================
-        # 2. STATUS DIRECTORY TABLE (High-performance chunking)
+        # 2. STATUS DIRECTORY TABLE (High-performance chunking, for Summary mode)
         # =====================================================================
-        story.append(Paragraph("Website Status Overview &amp; Audit Directory", self.h2_style))
-        header_cells = [
-            Paragraph("<b>Domain / Target URL</b>", self.body_style),
-            Paragraph("<b>Status</b>", self.body_style),
-            Paragraph("<b>HTTP Code</b>", self.body_style),
-            Paragraph("<b>Latency</b>", self.body_style),
-            Paragraph("<b>SSL</b>", self.body_style),
-            Paragraph("<b>DNS</b>", self.body_style),
-        ]
+        if not include_visuals:
+            story.append(Paragraph("Website Status Overview &amp; Audit Directory", self.h2_style))
+            header_cells = [
+                Paragraph("<b>Domain / Target URL</b>", self.body_style),
+                Paragraph("<b>Status</b>", self.body_style),
+                Paragraph("<b>HTTP Code</b>", self.body_style),
+                Paragraph("<b>Latency</b>", self.body_style),
+                Paragraph("<b>SSL</b>", self.body_style),
+                Paragraph("<b>DNS</b>", self.body_style),
+            ]
 
-        data_rows = []
-        for r in results:
-            domain = r.get("domain") or r.get("original_url", "")
-            orig_url = r.get("original_url", "")
-            final_url = r.get("final_url") or orig_url
-            status = r.get("status", "UNKNOWN")
-            http_code = str(r.get("http_status_code") or "—")
-            rt = f"{r.get('response_time_ms'):.0f}ms" if r.get("response_time_ms") else "—"
+            data_rows = []
+            for r in results:
+                domain = r.get("domain") or r.get("original_url", "")
+                orig_url = r.get("original_url", "")
+                final_url = r.get("final_url") or orig_url
+                status = r.get("status", "UNKNOWN")
+                http_code = str(r.get("http_status_code") or "—")
+                rt = f"{r.get('response_time_ms'):.0f}ms" if r.get("response_time_ms") else "—"
 
-            status_color = "#16a34a" if status == "ONLINE" else "#dc2626" if status == "OFFLINE" else "#d97706"
-            status_cell = Paragraph(f"<font color='{status_color}'><b>{status}</b></font>", self.body_style)
-            ssl_cell = Paragraph("<font color='#16a34a'>PASS</font>" if status not in ("SSL_ERROR", "OFFLINE") else "<font color='#dc2626'>ISSUE</font>", self.body_style)
-            dns_cell = Paragraph("<font color='#16a34a'>RESOLVED</font>" if status != "DNS_ERROR" else "<font color='#dc2626'>FAILED</font>", self.body_style)
+                status_color = "#16a34a" if status == "ONLINE" else "#dc2626" if status == "OFFLINE" else "#d97706"
+                status_cell = Paragraph(f"<font color='{status_color}'><b>{status}</b></font>", self.body_style)
+                ssl_cell = Paragraph("<font color='#16a34a'>PASS</font>" if status not in ("SSL_ERROR", "OFFLINE") else "<font color='#dc2626'>ISSUE</font>", self.body_style)
+                dns_cell = Paragraph("<font color='#16a34a'>RESOLVED</font>" if status != "DNS_ERROR" else "<font color='#dc2626'>FAILED</font>", self.body_style)
 
-            if final_url and orig_url and final_url.rstrip('/') != orig_url.rstrip('/'):
-                domain_para = Paragraph(f"<font size='8'><b>{domain}</b><br/><font color='#2563eb'>&rarr; {final_url[:40]}</font></font>", self.body_style)
-            else:
-                domain_para = Paragraph(f"<font size='8.5'>{domain}</font>", self.body_style)
+                if final_url and orig_url and final_url.rstrip('/') != orig_url.rstrip('/'):
+                    domain_para = Paragraph(f"<font size='8'><b>{domain}</b><br/><font color='#2563eb'>&rarr; {final_url[:40]}</font></font>", self.body_style)
+                else:
+                    domain_para = Paragraph(f"<font size='8.5'>{domain}</font>", self.body_style)
 
-            data_rows.append([
-                domain_para,
-                status_cell,
-                Paragraph(http_code, self.body_style),
-                Paragraph(rt, self.body_style),
-                ssl_cell,
-                dns_cell,
-            ])
-
-        TABLE_CHUNK_SIZE = 35
-        for chunk_idx in range(0, max(len(data_rows), 1), TABLE_CHUNK_SIZE):
-            chunk_rows = [header_cells] + data_rows[chunk_idx:chunk_idx + TABLE_CHUNK_SIZE]
-            t = Table(chunk_rows, colWidths=[184, 80, 60, 60, 60, 60])
-            t.setStyle(
-                TableStyle([
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0f172a")),
-                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-                    ("TOPPADDING", (0, 0), (-1, -1), 4),
-                    ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#e2e8f0")),
-                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+                data_rows.append([
+                    domain_para,
+                    status_cell,
+                    Paragraph(http_code, self.body_style),
+                    Paragraph(rt, self.body_style),
+                    ssl_cell,
+                    dns_cell,
                 ])
-            )
-            story.append(t)
-            story.append(Spacer(1, 8))
+
+            TABLE_CHUNK_SIZE = 35
+            for chunk_idx in range(0, max(len(data_rows), 1), TABLE_CHUNK_SIZE):
+                chunk_rows = [header_cells] + data_rows[chunk_idx:chunk_idx + TABLE_CHUNK_SIZE]
+                t = Table(chunk_rows, colWidths=[184, 80, 60, 60, 60, 60])
+                t.setStyle(
+                    TableStyle([
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0f172a")),
+                        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                        ("TOPPADDING", (0, 0), (-1, -1), 4),
+                        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#e2e8f0")),
+                        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+                    ])
+                )
+                story.append(t)
+                story.append(Spacer(1, 8))
 
         # =====================================================================
-        # 3. DETAILED VISUAL INSPECTION APPENDIX (Only when requested or for small sets)
+        # 3. DETAILED VISUAL INSPECTION APPENDIX (Full 1,000 targets per batch with images)
         # =====================================================================
         if include_visuals:
             story.append(PageBreak())
@@ -401,8 +402,7 @@ class PDFReportGenerator:
             )
             story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#4f46e5"), spaceBefore=4, spaceAfter=20))
 
-            # Limit visual pages to max 100 per PDF to prevent out-of-memory
-            visual_results = results[:100]
+            visual_results = results
             for idx, r in enumerate(visual_results, start=1):
                 domain = r.get("domain") or r.get("original_url", f"Site #{idx}")
                 orig_url = r.get("original_url", "")
@@ -503,14 +503,14 @@ class PDFReportGenerator:
                             if not os.path.isfile(thumb_path):
                                 with PILImage.open(full_img_path) as im:
                                     rgb_im = im.convert("RGB")
-                                    rgb_im.thumbnail((800, 500))
-                                    rgb_im.save(thumb_path, "JPEG", quality=75, optimize=True)
+                                    rgb_im.thumbnail((640, 400))
+                                    rgb_im.save(thumb_path, "JPEG", quality=70, optimize=True)
                             if os.path.isfile(thumb_path):
                                 optimized_path = thumb_path
                         except Exception:
                             pass
 
-                        img = Image(optimized_path, width=500, height=280)
+                        img = Image(optimized_path, width=480, height=270)
                         website_elements.append(img)
                         img_added = True
                     except Exception as img_err:

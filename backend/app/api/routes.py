@@ -890,7 +890,7 @@ async def download_pdf_report(
     scan_id: str,
     refresh: bool = Query(False),
     batch: Optional[int] = Query(None),
-    batch_size: int = Query(50),
+    batch_size: int = Query(1000),
     status: Optional[str] = Query(None, description="Filter: ALL, ONLINE, OFFLINE, ERRORS"),
     mode: Optional[str] = Query(None, description="Mode: summary, visual, issues"),
 ):
@@ -921,13 +921,18 @@ async def download_pdf_report(
         elif sf in ("ERRORS", "ERROR", "WARNINGS"):
             filtered_results = [r for r in results if str(r.get("status") or "").upper() not in ("ONLINE", "OFFLINE")]
 
-    # Support batched PDF slices for large target lists (e.g. 50 targets per batch)
+    # Support batched PDF slices (default 1000 targets per batch)
     batch_suffix = ""
     if batch is not None and batch > 0:
         start_idx = (batch - 1) * batch_size
         end_idx = min(start_idx + batch_size, len(filtered_results))
         batch_results = filtered_results[start_idx:end_idx]
         batch_suffix = f"_batch_{batch}"
+    elif mode == "visual" and len(filtered_results) > batch_size:
+        start_idx = 0
+        end_idx = min(batch_size, len(filtered_results))
+        batch_results = filtered_results[start_idx:end_idx]
+        batch_suffix = "_batch_1"
     else:
         batch_results = filtered_results
 

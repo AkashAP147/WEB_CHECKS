@@ -94,9 +94,9 @@ export default function ScanResults() {
     }
   };
 
-  const [pdfBatch, setPdfBatch] = useState<number>(0);
+  const [pdfBatch, setPdfBatch] = useState<number>(1);
   const [pdfStatusFilter, setPdfStatusFilter] = useState<'ALL' | 'ONLINE' | 'OFFLINE' | 'ERRORS'>('ALL');
-  const [pdfMode, setPdfMode] = useState<'summary' | 'issues' | 'visual'>('summary');
+  const [pdfMode, setPdfMode] = useState<'summary' | 'issues' | 'visual'>('visual');
   const [isStopping, setIsStopping] = useState<boolean>(false);
 
   const handleStopScan = async () => {
@@ -118,7 +118,12 @@ export default function ScanResults() {
     const params = new URLSearchParams();
     const selectedBatch = batchNum !== undefined ? batchNum : pdfBatch;
     if (type === 'pdf') {
-      if (selectedBatch > 0) params.set('batch', String(selectedBatch));
+      if (pdfMode === 'visual') {
+        params.set('batch', String(selectedBatch > 0 ? selectedBatch : 1));
+        params.set('batch_size', '1000');
+      } else if (selectedBatch > 0) {
+        params.set('batch', String(selectedBatch));
+      }
       const s = statusOverride !== undefined ? statusOverride : pdfStatusFilter;
       if (s && s !== 'ALL') params.set('status', s);
       if (pdfMode) params.set('mode', pdfMode);
@@ -213,13 +218,14 @@ export default function ScanResults() {
               const m = e.target.value as any;
               setPdfMode(m);
               if (m === 'issues') setPdfStatusFilter('ERRORS');
+              if (m === 'visual' && (!pdfBatch || pdfBatch === 0)) setPdfBatch(1);
             }}
             className="text-xs py-2 px-2.5 rounded-lg border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 text-surface-700 dark:text-surface-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 shadow-xs cursor-pointer font-medium"
             title="Choose PDF format"
           >
-            <option value="summary">PDF: Executive Summary (Fast Table, ~2 MB)</option>
-            <option value="issues">PDF: Offline &amp; Issues Only (With Snapshots)</option>
-            <option value="visual">PDF: Visual Inspection (With Screenshots)</option>
+            <option value="visual">PDF: Visual Report (1,000 Targets per PDF with Images)</option>
+            <option value="summary">PDF: Executive Summary (All {total} Targets Table, Fast ~2 MB)</option>
+            <option value="issues">PDF: Offline &amp; Issues Only (With Diagnostic Snapshots)</option>
           </select>
 
           {/* PDF Status Scope Selector (only if not in issues mode) */}
@@ -237,17 +243,16 @@ export default function ScanResults() {
             </select>
           )}
 
-          {pdfMode === 'visual' && total > 50 && (
+          {pdfMode === 'visual' && total > 1000 && (
             <select
               value={pdfBatch}
               onChange={(e) => setPdfBatch(Number(e.target.value))}
-              className="text-xs py-2 px-2.5 rounded-lg border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 text-surface-700 dark:text-surface-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 shadow-xs cursor-pointer"
-              title="Select 50-target visual batch to download"
+              className="text-xs py-2 px-2.5 rounded-lg border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 text-surface-700 dark:text-surface-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 shadow-xs cursor-pointer font-semibold text-indigo-600 dark:text-indigo-400"
+              title="Select 1,000-target visual batch to download"
             >
-              <option value={0}>All Targets (First 100 Screenshots)</option>
-              {Array.from({ length: Math.ceil(total / 50) }, (_, i) => (
+              {Array.from({ length: Math.ceil(total / 1000) }, (_, i) => (
                 <option key={i + 1} value={i + 1}>
-                  Batch {i + 1} ({i * 50 + 1} - {Math.min((i + 1) * 50, total)})
+                  Batch {i + 1} (Targets {i * 1000 + 1} – {Math.min((i + 1) * 1000, total)} with Screenshots)
                 </option>
               ))}
             </select>
