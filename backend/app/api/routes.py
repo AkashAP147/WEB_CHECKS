@@ -1005,6 +1005,56 @@ async def dashboard():
 
 
 # ---------------------------------------------------------------------------
+# POST /api/database/reset
+# ---------------------------------------------------------------------------
+@router.post("/database/reset")
+async def reset_database():
+    """Clear all scans, results, dns/ssl records, and purge all stored screenshots and reports."""
+    import glob
+    async with get_db() as db:
+        await db.execute("DELETE FROM scans")
+        await db.execute("DELETE FROM scan_results")
+        await db.execute("DELETE FROM dns_records")
+        await db.execute("DELETE FROM ssl_details")
+        try:
+            await db.execute("DELETE FROM sqlite_sequence")
+        except Exception:
+            pass
+        await db.commit()
+        try:
+            await db.execute("VACUUM")
+        except Exception:
+            pass
+
+    # Clear screenshots
+    deleted_images = 0
+    for f in glob.glob(os.path.join(settings.screenshots_dir, "*.*")):
+        if not f.endswith(".gitkeep"):
+            try:
+                os.remove(f)
+                deleted_images += 1
+            except Exception:
+                pass
+
+    # Clear reports
+    deleted_reports = 0
+    for f in glob.glob(os.path.join(settings.reports_dir, "*.*")):
+        if not f.endswith(".gitkeep"):
+            try:
+                os.remove(f)
+                deleted_reports += 1
+            except Exception:
+                pass
+
+    return {
+        "success": True,
+        "message": "Database, screenshots, and reports successfully reset.",
+        "deleted_images": deleted_images,
+        "deleted_reports": deleted_reports,
+    }
+
+
+# ---------------------------------------------------------------------------
 # WebSocket /api/ws/scan/{scan_id}
 # ---------------------------------------------------------------------------
 @router.websocket("/ws/scan/{scan_id}")
