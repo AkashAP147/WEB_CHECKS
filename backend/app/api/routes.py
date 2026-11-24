@@ -138,36 +138,6 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         async with get_db() as db:
             await update_scan_status(db, scan_id, "running", completed_urls=0)
 
-        # 2. Daily Deduplication: fetch recently-audited ONLINE URLs in a single fast query
-        _daily_cache: Dict[str, dict] = {}
-        try:
-            async with get_db() as db:
-                cursor = await db.execute(
-                    """
-                    SELECT original_url, final_url, domain, status,
-                           http_status_code, response_time_ms, server_info,
-                           website_title, screenshot_path, error_message
-                    FROM scan_results
-                    WHERE created_at >= datetime('now', '-24 hours') AND status = 'ONLINE'
-                    ORDER BY id DESC
-                    """
-                )
-                cached_rows = await cursor.fetchall()
-                for row in cached_rows:
-                    rd = dict(row)
-                    orig = (rd.get("original_url") or "").lower().strip()
-                    if orig and orig not in _daily_cache:
-                        _daily_cache[orig] = rd
-                    dom = (rd.get("domain") or "").lower().strip()
-                    if dom and dom not in _daily_cache:
-                        _daily_cache[dom] = rd
-                    fin = (rd.get("final_url") or "").lower().strip()
-                    if fin and fin not in _daily_cache:
-                        _daily_cache[fin] = rd
-            logger.info("Daily cache: loaded %d unique cached targets from past 24h.", len(_daily_cache))
-        except Exception as cache_load_err:
-            logger.warning("Daily cache pre-load failed (proceeding without cache): %s", cache_load_err)
-
         # Domain-level fast in-memory caches (eliminates duplicate DNS/SSL checks for identical domains)
         _dns_memory_cache: Dict[str, list] = {}
         _ssl_memory_cache: Dict[str, dict | None] = {}
@@ -240,28 +210,6 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                 tentative_domain = (parsed.netloc or parsed.path).split(":")[0].split("/")[0]
             except Exception:
                 tentative_domain = raw_url.replace("https://", "").replace("http://", "").split("/")[0]
-
-            # Daily URL cache check: fast in-memory lookup (zero DB overhead)
-            cache_key = raw_url.lower().strip()
-            cached_res = _daily_cache.get(cache_key)
-            if not cached_res and tentative_domain:
-                cached_res = _daily_cache.get(tentative_domain.lower().strip())
-
-            if cached_res:
-                reused_res = {
-                    "original_url": raw_url,
-                    "final_url": cached_res.get("final_url") or raw_url,
-                    "domain": cached_res.get("domain") or tentative_domain,
-                    "status": cached_res.get("status", "ONLINE"),
-                    "http_status_code": cached_res.get("http_status_code"),
-                    "response_time_ms": cached_res.get("response_time_ms"),
-                    "server_info": cached_res.get("server_info"),
-                    "website_title": cached_res.get("website_title"),
-                    "screenshot_path": cached_res.get("screenshot_path"),
-                    "error_message": cached_res.get("error_message"),
-                }
-                await db_queue.put((reused_res, [], None))
-                return
 
             # Coroutines for network operations:
             async def run_http():

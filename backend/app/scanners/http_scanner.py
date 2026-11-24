@@ -197,8 +197,8 @@ class HttpScanner:
         except httpx.TimeoutException as exc:
             elapsed = (time.monotonic() - start) * 1000
             result["response_time_ms"] = round(elapsed, 2)
-            result["status"] = STATUS_TIMEOUT
-            result["error_message"] = f"Request timed out: {exc}"
+            result["status"] = STATUS_OFFLINE
+            result["error_message"] = "Host unreachable: request timed out."
             result["redirect_chain"] = redirect_chain
             result["is_redirect"] = bool(redirect_chain)
             return result
@@ -279,14 +279,8 @@ def _classify_exception(exc: Exception) -> tuple[str, str]:
     exc_type = type(exc).__name__
     exc_msg = str(exc)
 
-    if isinstance(exc, httpx.ConnectTimeout):
-        return STATUS_OFFLINE, "Host unreachable: connection timed out"
-
-    if isinstance(exc, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout)):
-        return STATUS_TIMEOUT, f"Response read timed out ({exc_type})"
-
-    if isinstance(exc, httpx.TimeoutException):
-        return STATUS_TIMEOUT, f"Request timed out: {exc_msg}"
+    if isinstance(exc, (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout, httpx.TimeoutException)):
+        return STATUS_OFFLINE, f"Host unreachable: connection timed out ({exc_type})"
 
     if isinstance(exc, httpx.ConnectError):
         lower = exc_msg.lower()

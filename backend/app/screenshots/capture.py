@@ -257,14 +257,23 @@ def _sync_capture_worker(
                     except Exception:
                         pass
 
-                    # Resilient navigation: wait for domcontentloaded up to 20s
+                    # Smart protocol fallback: try http first if https timed out in network check
+                    if "://" in url:
+                        primary_url = url
+                        alt_url = url.replace("https://", "http://", 1) if url.startswith("https://") else url.replace("http://", "https://", 1)
+                    else:
+                        if status_info and status_info.get("status") in ("TIMEOUT", "OFFLINE"):
+                            primary_url = f"http://{url}"
+                            alt_url = f"https://{url}"
+                        else:
+                            primary_url = f"https://{url}"
+                            alt_url = f"http://{url}"
+
                     navigated = False
-                    target_url = url if "://" in url else f"https://{url}"
                     try:
-                        page.goto(target_url, wait_until="domcontentloaded", timeout=20000)
+                        page.goto(primary_url, wait_until="domcontentloaded", timeout=12000)
                         navigated = True
-                    except Exception as nav_err:
-                        # If domcontentloaded was waiting on slow ad scripts/trackers, check if page rendered
+                    except Exception:
                         try:
                             content = page.content()
                             if content and len(content) > 300:
@@ -272,18 +281,17 @@ def _sync_capture_worker(
                         except Exception:
                             pass
 
-                        if not navigated and target_url.startswith("https://"):
+                    if not navigated:
+                        try:
+                            page.goto(alt_url, wait_until="domcontentloaded", timeout=10000)
+                            navigated = True
+                        except Exception:
                             try:
-                                http_url = target_url.replace("https://", "http://", 1)
-                                page.goto(http_url, wait_until="domcontentloaded", timeout=15000)
-                                navigated = True
+                                content = page.content()
+                                if content and len(content) > 300:
+                                    navigated = True
                             except Exception:
-                                try:
-                                    content = page.content()
-                                    if content and len(content) > 300:
-                                        navigated = True
-                                except Exception:
-                                    pass
+                                pass
 
                     if navigated:
                         try:
