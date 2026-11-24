@@ -11,6 +11,7 @@ import re
 import time
 import asyncio
 import ssl
+import html as _html
 from dataclasses import dataclass, field
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -43,8 +44,11 @@ MAX_REDIRECTS = 5
 # Default request timeout in seconds (optimized for fast parallel discovery).
 DEFAULT_TIMEOUT = 7.0
 
-# Regex to pull <title> from an HTML document.
+# Regexes to pull titles from HTML documents.
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+_OG_TITLE_RE = re.compile(r'<meta[^>]+(?:property|name)=["\'](?:og:title|twitter:title)["\'][^>]+content=["\'](.*?)["\']', re.IGNORECASE)
+_OG_TITLE_RE_ALT = re.compile(r'<meta[^>]+content=["\'](.*?)["\'][^>]+(?:property|name)=["\'](?:og:title|twitter:title)["\']', re.IGNORECASE)
+_H1_RE = re.compile(r"<h1[^>]*>(.*?)</h1>", re.IGNORECASE | re.DOTALL)
 
 # Common browser-like User-Agent to avoid bot-blocks on casual scans.
 _USER_AGENT = (
@@ -256,11 +260,25 @@ class HttpScanner:
 # ---------------------------------------------------------------------------
 
 def _extract_title(html: str) -> str | None:
-    """Return the ``<title>`` text from *html*, or ``None``."""
-    match = _TITLE_RE.search(html[:8192])  # limit search window
+    """Return the title text from *html*, or ``None``."""
+    if not html:
+        return None
+    chunk = html[:65536]  # check first 64KB for title/metadata
+    title = None
+    match = _TITLE_RE.search(chunk)
     if match:
-        title = match.group(1).strip()
-        # Collapse whitespace.
+        title = match.group(1)
+    else:
+        og_match = _OG_TITLE_RE.search(chunk) or _OG_TITLE_RE_ALT.search(chunk)
+        if og_match:
+            title = og_match.group(1)
+        else:
+            h1_match = _H1_RE.search(chunk)
+            if h1_match:
+                title = re.sub(r"<[^>]+>", "", h1_match.group(1))
+
+    if title:
+        title = _html.unescape(title).strip()
         title = re.sub(r"\s+", " ", title)
         return title if title else None
     return None

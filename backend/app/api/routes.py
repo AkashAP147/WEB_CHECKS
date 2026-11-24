@@ -53,11 +53,7 @@ from backend.app.utils.url_validator import validate_url, is_safe_url, validate_
 from backend.app.scanners.http_scanner import HttpScanner
 from backend.app.dns.analyzer import DNSAnalyzer
 from backend.app.ssl_mod.checker import SSLChecker
-from backend.app.screenshots.capture import (
-    ScreenshotCapture,
-    generate_diagnostic_screenshot,
-    _build_filename,
-)
+from backend.app.screenshots.capture import ScreenshotCapture
 
 # Optional heavyweight imports – degrade gracefully when unavailable
 try:
@@ -143,14 +139,10 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         _ssl_memory_cache: Dict[str, dict | None] = {}
 
         # Concurrency control:
-        # 1. URL network worker concurrency: 60 on Windows (80 on Linux/Colab) for high stability & speed
-        default_concurrency = 60 if sys.platform == "win32" else 80
+        # URL network worker concurrency: 75 on Windows (100 on Linux/Colab) for high stability & speed
+        default_concurrency = 75 if sys.platform == "win32" else 100
         concurrency_limit = min(settings.max_concurrent_scans, default_concurrency)
         url_semaphore = asyncio.Semaphore(concurrency_limit)
-
-        # 2. Screenshot concurrency: 10 parallel browser workers
-        screenshot_limit = 10
-        screenshot_semaphore = asyncio.Semaphore(screenshot_limit)
 
         # -----------------------------------------------------------------------
         # Producer-Consumer DB Batch Writer
@@ -287,22 +279,6 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                 status = http_res.get("status")
                 target_to_capture = http_res.get("final_url") or raw_url
 
-                # Fast short-circuit: ONLY HTTP errors where the server explicitly answered with 4xx or 5xx.
-                # All other states (DNS_ERROR, OFFLINE, TIMEOUT) proceed to browser verification to ensure no false negatives!
-                if status == "HTTP_ERROR":
-                    try:
-                        filename = _build_filename(scan_id, target_to_capture)
-                        abs_path = os.path.join(settings.screenshots_dir, filename)
-                        created = await asyncio.to_thread(
-                            generate_diagnostic_screenshot, abs_path, target_to_capture, http_res
-                        )
-                        if created:
-                            http_res["screenshot_path"] = f"screenshots/{filename}"
-                    except Exception:
-                        pass
-                    await db_queue.put((http_res, [], None))
-                    return
-
                 # For ONLINE sites: run DNS and SSL concurrently
                 if status == "ONLINE":
                     dns_records, ssl_data = await asyncio.gather(run_dns(), run_ssl())
@@ -311,59 +287,17 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
 
             # url_semaphore IS RELEASED! Other network workers immediately scan the next URLs!
 
-            # --- PHASE 2: PARALLEL SCREENSHOT & BROWSER VERIFICATION DISPATCH ---
-            screenshot_path = None
+            # --- PHASE 2: INSTANT VISUAL INSPECTION CARD GENERATION ---
             try:
-                async with screenshot_semaphore:
-                    ss_res = await asyncio.wait_for(
-                        screenshot_capturer.capture(
-                            target_to_capture,
-                            scan_id,
-                            status_info=http_res,
-                        ),
-                        timeout=18.0,
-                    )
-                if ss_res.get("success"):
-                    screenshot_path = ss_res.get("screenshot_path")
-                    # If Chromium successfully navigated, extract loaded page data and upgrade to ONLINE
-                    if ss_res.get("browser_captured"):
-                        browser_status = ss_res.get("status_code")
-                        http_status = http_res.get("http_status_code")
-                        final_status = browser_status or http_status or 200
-
-                        if final_status < 400:
-                            http_res["status"] = "ONLINE"
-                            http_res["error_message"] = None
-                        elif final_status >= 400:
-                            http_res["status"] = "HTTP_ERROR"
-                            http_res["error_message"] = f"HTTP {final_status}: site returned error."
-
-                        http_res["http_status_code"] = final_status
-                        if ss_res.get("final_url"):
-                            http_res["final_url"] = ss_res["final_url"]
-                        if ss_res.get("title") and (not http_res.get("website_title") or http_res["website_title"] in ("Untitled", "")):
-                            http_res["website_title"] = ss_res["title"]
+                ss_res = await screenshot_capturer.capture(
+                    target_to_capture,
+                    scan_id,
+                    status_info=http_res,
+                )
+                http_res["screenshot_path"] = ss_res.get("screenshot_path")
             except Exception as ss_err:
-                logger.debug("Screenshot error for %s: %s", raw_url, ss_err)
-
-            # Fallback diagnostic snapshot if browser screenshot failed
-            if not screenshot_path:
-                try:
-                    filename = _build_filename(scan_id, target_to_capture)
-                    abs_path = os.path.join(settings.screenshots_dir, filename)
-                    # Only create diagnostic image if a valid screenshot wasn't already written
-                    if not os.path.exists(abs_path) or os.path.getsize(abs_path) == 0:
-                        created = await asyncio.to_thread(
-                            generate_diagnostic_screenshot, abs_path, target_to_capture, http_res
-                        )
-                        if created:
-                            screenshot_path = f"screenshots/{filename}"
-                    else:
-                        screenshot_path = f"screenshots/{filename}"
-                except Exception:
-                    pass
-
-            http_res["screenshot_path"] = screenshot_path
+                logger.debug("Visual snapshot generation error for %s: %s", raw_url, ss_err)
+                http_res["screenshot_path"] = None
 
             # Push to DB batch queue (non-blocking instant hand-off)
             await db_queue.put((http_res, dns_records, ssl_data))
