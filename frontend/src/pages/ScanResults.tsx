@@ -134,7 +134,9 @@ export default function ScanResults() {
     // Direct browser native download: NO Javascript in-memory buffering & NO 120s timeout
     const link = document.createElement('a');
     link.href = url;
-    link.setAttribute('download', '');
+    const cleanName = scan?.filename ? scan.filename.replace(/\.[^/.]+$/, "").replace(/[^a-zA-Z0-9_-]/g, "_") : "";
+    const baseName = cleanName ? `${cleanName}_${scanId.substring(0, 8)}` : `WebPulse_Audit_${scanId.substring(0, 8)}`;
+    link.setAttribute('download', `${baseName}.${type === 'excel' ? 'xlsx' : type}`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);

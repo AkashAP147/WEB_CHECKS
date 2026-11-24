@@ -912,7 +912,10 @@ async def download_pdf_report(
         batch_results = filtered_results
 
     mode_suffix = f"_{mode}" if mode else ""
-    filename = f"WebPulse_Audit_{scan_id[:8]}{status_suffix}{mode_suffix}{batch_suffix}.pdf"
+    raw_filename = scan.get("filename")
+    clean_prefix = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', os.path.splitext(raw_filename)[0]) if raw_filename else ""
+    name_stem = f"{clean_prefix}_{scan_id[:8]}" if clean_prefix else f"WebPulse_Audit_{scan_id[:8]}"
+    filename = f"{name_stem}{status_suffix}{mode_suffix}{batch_suffix}.pdf"
     filepath = os.path.join(settings.reports_dir, filename)
 
     # Always generate or regenerate when requested, filtered, or if missing
@@ -946,7 +949,9 @@ async def download_excel_report(scan_id: str):
             raise HTTPException(status_code=404, detail="Scan not found.")
         results = await get_scan_results(db, scan_id)
 
-    filename = f"report_{scan_id}.xlsx"
+    raw_filename = scan.get("filename")
+    clean_prefix = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', os.path.splitext(raw_filename)[0]) if raw_filename else ""
+    filename = f"{clean_prefix}_{scan_id[:8]}.xlsx" if clean_prefix else f"report_{scan_id}.xlsx"
     filepath = os.path.join(settings.reports_dir, filename)
 
     if not os.path.isfile(filepath):
@@ -974,7 +979,9 @@ async def download_csv_report(scan_id: str):
             raise HTTPException(status_code=404, detail="Scan not found.")
         results = await get_scan_results(db, scan_id)
 
-    filename = f"WebPulse_GoogleSheets_{scan_id}.csv"
+    raw_filename = scan.get("filename")
+    clean_prefix = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', os.path.splitext(raw_filename)[0]) if raw_filename else ""
+    filename = f"{clean_prefix}_{scan_id[:8]}.csv" if clean_prefix else f"WebPulse_GoogleSheets_{scan_id}.csv"
     filepath = os.path.join(settings.reports_dir, filename)
 
     with open(filepath, "w", newline="", encoding="utf-8-sig") as f:

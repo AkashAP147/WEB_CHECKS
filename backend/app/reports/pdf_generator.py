@@ -246,9 +246,12 @@ class PDFReportGenerator:
         created_at_raw = scan.get("created_at")
         formatted_date = _format_pdf_dt(created_at_raw)
         total_urls = len(results)
+        uploaded_filename = scan.get("filename")
+        source_label = uploaded_filename if uploaded_filename else "Direct URL Submission"
 
         meta_data = [
             [Paragraph("<b>Audit ID:</b>", self.body_style), Paragraph(str(scan_id), self.code_style)],
+            [Paragraph("<b>Source / Uploaded File:</b>", self.body_style), Paragraph(f"<b>{source_label}</b>", self.body_style)],
             [Paragraph("<b>Audit Timestamp:</b>", self.body_style), Paragraph(formatted_date, self.body_style)],
             [Paragraph("<b>Report Scope:</b>", self.body_style), Paragraph(f"<b>{status_filter.upper() if status_filter else 'ALL (Sorted)'}</b>", self.body_style)],
             [Paragraph("<b>Total Targets in Report:</b>", self.body_style), Paragraph(str(total_urls), self.body_style)],
@@ -281,7 +284,7 @@ class PDFReportGenerator:
         story.append(Paragraph("Executive Summary", self.h1_style))
         story.append(
             Paragraph(
-                "Aggregated health indicators across all submitted web assets.",
+                f"Aggregated health indicators across all submitted web assets from <b>{source_label}</b>.",
                 self.body_style,
             )
         )

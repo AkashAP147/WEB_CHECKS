@@ -68,14 +68,14 @@ class ExcelReportGenerator:
         # Remove default sheet
         wb.remove(wb.active)
 
-        # Fetch all DNS and SSL records in single batch queries (sub-millisecond)
+        # Fetch all DNS and SSL records in single batch queries (read-only, non-blocking)
         dns_records_by_site: List[Dict[str, Any]] = []
         ssl_details_by_site: List[Dict[str, Any]] = []
         scan_id = scan.get("id") or scan.get("scan_id")
 
         try:
-            db_path = settings.db_path
-            with sqlite3.connect(db_path) as conn:
+            conn = sqlite3.connect(settings.db_path, timeout=3.0)
+            try:
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
                 if scan_id:
@@ -106,11 +106,13 @@ class ExcelReportGenerator:
                         dns_records_by_site = [dict(r) for r in cur.fetchall()]
                         cur.execute(f"SELECT * FROM ssl_details WHERE scan_result_id IN ({placeholders})", result_ids)
                         ssl_details_by_site = [dict(r) for r in cur.fetchall()]
+            finally:
+                conn.close()
         except Exception:
             pass
 
         # Build each sheet
-        self._build_sheet_website_status(wb, results)
+        self._build_sheet_website_status(wb, results, scan)
         self._build_sheet_dns_records(wb, dns_records_by_site)
         self._build_sheet_ssl_details(wb, ssl_details_by_site)
         self._build_sheet_summary(wb, scan, results)
@@ -118,11 +120,15 @@ class ExcelReportGenerator:
         wb.save(output_path)
         return output_path
 
-    def _build_sheet_website_status(self, wb: openpyxl.Workbook, results: List[Dict[str, Any]]):
+    def _build_sheet_website_status(self, wb: openpyxl.Workbook, results: List[Dict[str, Any]], scan: Optional[Dict[str, Any]] = None):
         ws = wb.create_sheet(title="Website Status")
         ws.views.sheetView[0].showGridLines = True
 
+        uploaded_filename = scan.get("filename") if scan else None
+        source_label = uploaded_filename if uploaded_filename else "Direct Submission"
+
         headers = [
+            "Source File",
             "Original Target URL",
             "Final / Redirect URL",
             "Domain",
@@ -147,6 +153,7 @@ class ExcelReportGenerator:
             screenshot_fn = os.path.basename(r.get("screenshot_path") or "") if r.get("screenshot_path") else ""
 
             row_data = [
+                source_label,
                 r.get("original_url") or "",
                 r.get("final_url") or "",
                 r.get("domain") or "",
@@ -170,13 +177,13 @@ class ExcelReportGenerator:
                 cell.border = self.thin_border
                 if fill:
                     cell.fill = fill
-                if col_idx in (4, 5, 6, 7, 8, 10):
+                if col_idx in (5, 6, 7, 8, 9, 11):
                     cell.alignment = self.align_center
                 else:
                     cell.alignment = self.align_left
 
         self._style_header_row(ws, len(headers))
-        self._add_conditional_formatting(ws, len(results), status_col="D")
+        self._add_conditional_formatting(ws, len(results), status_col="E")
         self._auto_fit_columns(ws)
 
     def _build_sheet_dns_records(self, wb: openpyxl.Workbook, records: List[Dict[str, Any]]):
@@ -270,9 +277,12 @@ class ExcelReportGenerator:
         ws = wb.create_sheet(title="Summary")
         ws.views.sheetView[0].showGridLines = True
 
+        uploaded_filename = scan.get("filename") if scan else None
+        source_label = uploaded_filename if uploaded_filename else "Direct URL Submission"
+
         # Header Title
         ws.cell(row=2, column=2, value="WebPulse Audit Report Summary").font = self.title_font
-        ws.cell(row=3, column=2, value=f"Generated on {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}").font = self.sub_title_font
+        ws.cell(row=3, column=2, value=f"Source: {source_label} | Generated on {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}").font = self.sub_title_font
 
         # Calculations
         total_cnt = len(results)
@@ -300,6 +310,8 @@ class ExcelReportGenerator:
         ws.cell(row=5, column=3).alignment = self.align_right
 
         metrics = [
+            ("Uploaded / Source File", source_label),
+            ("Audit ID", str(scan.get("id") or scan.get("scan_id") or "N/A") if scan else "N/A"),
             ("Total Websites Scanned", total_cnt),
             ("Websites Online", online_cnt),
             ("Websites Offline", offline_cnt),

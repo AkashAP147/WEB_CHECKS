@@ -88,15 +88,17 @@ export default function History() {
     fetchHistory();
   }, [fetchHistory]);
 
-  const handleDownloadReport = async (scanId: string, type: 'pdf' | 'excel') => {
+  const handleDownloadReport = async (scanId: string, type: 'pdf' | 'excel', filename?: string | null) => {
     setDownloadingId(`${scanId}_${type}`);
     try {
+      const cleanName = filename ? filename.replace(/\.[^/.]+$/, "").replace(/[^a-zA-Z0-9_-]/g, "_") : "";
+      const baseName = cleanName ? `${cleanName}_${scanId.substring(0, 8)}` : `WebPulse_Audit_${scanId.substring(0, 8)}`;
       if (type === 'pdf') {
         const blob = await scanApi.downloadPDF(scanId);
-        downloadBlob(blob, `WebPulse_Audit_${scanId}.pdf`);
+        downloadBlob(blob, `${baseName}.pdf`);
       } else {
         const blob = await scanApi.downloadExcel(scanId);
-        downloadBlob(blob, `WebPulse_Audit_${scanId}.xlsx`);
+        downloadBlob(blob, `${baseName}.xlsx`);
       }
     } catch (err: any) {
       alert(`Download failed: ` + (err.message || 'Error'));
@@ -384,7 +386,7 @@ export default function History() {
                         >
                           <button
                             title="Download PDF"
-                            onClick={() => handleDownloadReport(item.scan_id, 'pdf')}
+                            onClick={() => handleDownloadReport(item.scan_id, 'pdf', item.filename)}
                             disabled={isPdfDownloading}
                             className="p-1.5 rounded-lg hover:bg-surface-200 dark:hover:bg-surface-700 text-rose-600 dark:text-rose-400"
                           >
@@ -397,7 +399,7 @@ export default function History() {
 
                           <button
                             title="Download Excel"
-                            onClick={() => handleDownloadReport(item.scan_id, 'excel')}
+                            onClick={() => handleDownloadReport(item.scan_id, 'excel', item.filename)}
                             disabled={isXlsxDownloading}
                             className="p-1.5 rounded-lg hover:bg-surface-200 dark:hover:bg-surface-700 text-emerald-600 dark:text-emerald-400"
                           >

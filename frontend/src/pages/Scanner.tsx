@@ -126,12 +126,14 @@ export default function Scanner() {
     if (!scan) return;
     setDownloadingType(type);
     try {
+      const cleanName = scan.filename ? scan.filename.replace(/\.[^/.]+$/, "").replace(/[^a-zA-Z0-9_-]/g, "_") : "";
+      const baseName = cleanName ? `${cleanName}_${scan.id.substring(0, 8)}` : `WebPulse_Audit_${scan.id.substring(0, 8)}`;
       if (type === 'pdf') {
         const blob = await scanApi.downloadPDF(scan.id);
-        downloadBlob(blob, `WebPulse_Audit_${scan.id}.pdf`);
+        downloadBlob(blob, `${baseName}.pdf`);
       } else {
         const blob = await scanApi.downloadExcel(scan.id);
-        downloadBlob(blob, `WebPulse_Audit_${scan.id}.xlsx`);
+        downloadBlob(blob, `${baseName}.xlsx`);
       }
     } catch (err: any) {
       alert(`Failed to download ${type.toUpperCase()} report: ` + (err.message || 'Error'));
