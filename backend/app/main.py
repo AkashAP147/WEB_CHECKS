@@ -99,9 +99,17 @@ app.mount(
 )
 
 # ---------------------------------------------------------------------------
-# API router
+# API router & Direct Database Reset Handlers
 # ---------------------------------------------------------------------------
 app.include_router(router)
+
+
+@app.api_route("/api/database/reset", methods=["GET", "POST", "DELETE"])
+@app.api_route("/database/reset", methods=["GET", "POST", "DELETE"])
+@app.api_route("/api/reset-db", methods=["GET", "POST", "DELETE"])
+async def root_reset_database():
+    from backend.app.api.routes import reset_database
+    return await reset_database()
 
 
 # ---------------------------------------------------------------------------

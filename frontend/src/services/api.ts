@@ -108,8 +108,13 @@ export const scanApi = {
   },
 
   resetDatabase: async (): Promise<{ success: boolean; message: string; deleted_images: number; deleted_reports: number }> => {
-    const { data } = await api.post('/database/reset');
-    return data;
+    try {
+      const { data } = await api.post('/database/reset');
+      return data;
+    } catch {
+      const { data } = await api.get('/database/reset');
+      return data;
+    }
   },
 };
 

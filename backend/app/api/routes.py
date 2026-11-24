@@ -1026,9 +1026,11 @@ async def dashboard():
 
 
 # ---------------------------------------------------------------------------
-# POST /api/database/reset
+# POST/GET/DELETE /api/database/reset
 # ---------------------------------------------------------------------------
-@router.post("/database/reset")
+@router.api_route("/database/reset", methods=["GET", "POST", "DELETE"])
+@router.api_route("/reset-db", methods=["GET", "POST", "DELETE"])
+@router.api_route("/database/clear", methods=["GET", "POST", "DELETE"])
 async def reset_database():
     """Clear all scans, results, dns/ssl records, and purge all stored screenshots and reports."""
     import glob
