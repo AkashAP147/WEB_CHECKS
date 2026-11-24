@@ -186,7 +186,7 @@ def _sync_capture_worker(
     url: str,
     abs_path: str,
     viewport: dict,
-    timeout_ms: int = 20000,
+    timeout_ms: int = 15000,
     status_info: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Worker function executed inside a thread using sync_playwright.
@@ -256,14 +256,14 @@ def _sync_capture_worker(
                     except Exception:
                         pass
 
-                    # Resilient navigation: ensure protocol, navigate with proper DOM hydration
+                    # Resilient fast navigation: domcontentloaded with DOM content fallback
                     navigated = False
                     target_url = url if "://" in url else f"https://{url}"
                     try:
-                        page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
+                        page.goto(target_url, wait_until="domcontentloaded", timeout=12000)
                         navigated = True
                     except Exception as nav_err:
-                        # Check if page actually loaded some content despite timeout/network error
+                        # If domcontentloaded was waiting on slow ad scripts/trackers, check if page rendered
                         try:
                             content = page.content()
                             if content and len(content) > 300:
@@ -274,7 +274,7 @@ def _sync_capture_worker(
                         if not navigated and target_url.startswith("https://"):
                             try:
                                 http_url = target_url.replace("https://", "http://", 1)
-                                page.goto(http_url, wait_until="domcontentloaded", timeout=12000)
+                                page.goto(http_url, wait_until="domcontentloaded", timeout=10000)
                                 navigated = True
                             except Exception:
                                 try:
@@ -313,7 +313,7 @@ class ScreenshotCapture:
     """
 
     DEFAULT_VIEWPORT = {"width": 1440, "height": 900}
-    DEFAULT_NAV_TIMEOUT_MS = 20_000
+    DEFAULT_NAV_TIMEOUT_MS = 15_000
 
     def __init__(self, screenshots_dir: str | None = None) -> None:
         self.screenshots_dir = screenshots_dir or settings.screenshots_dir

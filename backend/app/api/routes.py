@@ -173,8 +173,8 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         _ssl_memory_cache: Dict[str, dict | None] = {}
 
         # Concurrency control:
-        # 1. URL network worker concurrency: 35 on Windows (50 on Linux/Colab) to prevent socket/DNS saturation
-        default_concurrency = 35 if sys.platform == "win32" else 50
+        # 1. URL network worker concurrency: 50 on Windows (75 on Linux/Colab) for high-speed scanning
+        default_concurrency = 50 if sys.platform == "win32" else 75
         concurrency_limit = min(settings.max_concurrent_scans, default_concurrency)
         url_semaphore = asyncio.Semaphore(concurrency_limit)
 
@@ -268,19 +268,19 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                 try:
                     return await asyncio.wait_for(
                         http_scanner.scan_url(raw_url, client=client),
-                        timeout=15.0,
+                        timeout=12.0,
                     )
                 except asyncio.TimeoutError:
                     return {
                         "original_url": raw_url,
                         "final_url": raw_url,
                         "domain": tentative_domain,
-                        "status": "TIMEOUT",
+                        "status": "OFFLINE",
                         "http_status_code": None,
-                        "response_time_ms": 15000.0,
+                        "response_time_ms": 12000.0,
                         "server_info": None,
                         "website_title": None,
-                        "error_message": "HTTP request timed out after 15 seconds.",
+                        "error_message": "Host unreachable (connection timed out after 12 seconds).",
                         "screenshot_path": None,
                     }
                 except Exception as exc:
@@ -369,7 +369,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                             scan_id,
                             status_info=http_res,
                         ),
-                        timeout=30.0,
+                        timeout=22.0,
                     )
                 if ss_res.get("success"):
                     screenshot_path = ss_res.get("screenshot_path")
@@ -402,7 +402,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         limits = httpx.Limits(max_connections=500, max_keepalive_connections=250)
         async with httpx.AsyncClient(
             limits=limits,
-            timeout=httpx.Timeout(connect=10.0, read=12.0, write=10.0, pool=None),
+            timeout=httpx.Timeout(connect=3.5, read=10.0, write=5.0, pool=None),
             follow_redirects=False,
             verify=False,
             headers={

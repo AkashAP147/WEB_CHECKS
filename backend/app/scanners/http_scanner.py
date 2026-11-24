@@ -36,8 +36,8 @@ STATUS_SSRF_BLOCKED = "SSRF_BLOCKED"
 # Max redirects we are willing to follow manually.
 MAX_REDIRECTS = 5
 
-# Default request timeout in seconds (balanced for accuracy and speed).
-DEFAULT_TIMEOUT = 12.0
+# Default request timeout in seconds (optimized for fast parallel discovery).
+DEFAULT_TIMEOUT = 10.0
 
 # Regex to pull <title> from an HTML document.
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
@@ -185,6 +185,15 @@ class HttpScanner:
             elapsed = (time.monotonic() - start) * 1000
 
         # -- Error classification --------------------------------------------
+        except httpx.ConnectTimeout as exc:
+            elapsed = (time.monotonic() - start) * 1000
+            result["response_time_ms"] = round(elapsed, 2)
+            result["status"] = STATUS_OFFLINE
+            result["error_message"] = "Host unreachable: connection timed out."
+            result["redirect_chain"] = redirect_chain
+            result["is_redirect"] = bool(redirect_chain)
+            return result
+
         except httpx.TimeoutException as exc:
             elapsed = (time.monotonic() - start) * 1000
             result["response_time_ms"] = round(elapsed, 2)
@@ -270,8 +279,11 @@ def _classify_exception(exc: Exception) -> tuple[str, str]:
     exc_type = type(exc).__name__
     exc_msg = str(exc)
 
-    if isinstance(exc, (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout)):
-        return STATUS_TIMEOUT, f"Connection timed out ({exc_type})"
+    if isinstance(exc, httpx.ConnectTimeout):
+        return STATUS_OFFLINE, "Host unreachable: connection timed out"
+
+    if isinstance(exc, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout)):
+        return STATUS_TIMEOUT, f"Response read timed out ({exc_type})"
 
     if isinstance(exc, httpx.TimeoutException):
         return STATUS_TIMEOUT, f"Request timed out: {exc_msg}"
