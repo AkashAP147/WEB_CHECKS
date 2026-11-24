@@ -143,8 +143,8 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         _ssl_memory_cache: Dict[str, dict | None] = {}
 
         # Concurrency control:
-        # URL network worker concurrency: 120 on Windows (150 on Linux/Colab) for ultra-fast throughput
-        default_concurrency = 120 if sys.platform == "win32" else 150
+        # URL network worker concurrency: 35 on Windows (50 on Linux) for optimal throughput without socket or DNS exhaustion
+        default_concurrency = 35 if sys.platform == "win32" else 50
         concurrency_limit = min(settings.max_concurrent_scans, default_concurrency)
         url_semaphore = asyncio.Semaphore(concurrency_limit)
 
@@ -306,7 +306,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                 try:
                     return await asyncio.wait_for(
                         http_scanner.scan_url(raw_url, client=client),
-                        timeout=10.0,
+                        timeout=8.0,
                     )
                 except asyncio.TimeoutError:
                     return {
@@ -315,7 +315,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                         "domain": tentative_domain,
                         "status": "TIMEOUT",
                         "http_status_code": None,
-                        "response_time_ms": 10000.0,
+                        "response_time_ms": 8000.0,
                         "server_info": None,
                         "website_title": None,
                         "error_message": "Host unreachable (connection timed out).",
@@ -393,10 +393,10 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
             await screenshot_queue.put((raw_url, target_to_capture, http_res))
 
         # Main Scan Execution Loop with Shared High-Throughput Persistent HTTP Client
-        limits = httpx.Limits(max_connections=600, max_keepalive_connections=300)
+        limits = httpx.Limits(max_connections=120, max_keepalive_connections=60)
         async with httpx.AsyncClient(
             limits=limits,
-            timeout=httpx.Timeout(connect=5.0, read=7.0, write=5.0, pool=None),
+            timeout=httpx.Timeout(connect=3.5, read=4.5, write=3.5, pool=5.0),
             follow_redirects=False,
             verify=False,
             headers={
@@ -415,14 +415,14 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         # Maximize workers: scale up screenshot worker pool to capture remaining screenshots at full throttle!
         remaining_ss = screenshot_queue.qsize()
         if remaining_ss > 0 and scan_id in _running_tasks:
-            logger.info("Network checks complete. Scaling up to 45 concurrent screenshot workers for remaining %d targets.", remaining_ss)
-            extra_workers = min(30, remaining_ss)
+            logger.info("Network checks complete. Scaling up to 24 concurrent screenshot workers for remaining %d targets.", remaining_ss)
+            extra_workers = min(16, remaining_ss)
             for _ in range(extra_workers):
                 ss_worker_tasks.append(asyncio.create_task(screenshot_worker()))
 
-        # Wait for all background screenshots to finish (with generous 60s timeout)
+        # Wait for all background screenshots to finish (with generous 180s timeout)
         try:
-            await asyncio.wait_for(screenshot_queue.join(), timeout=60.0)
+            await asyncio.wait_for(screenshot_queue.join(), timeout=180.0)
         except (asyncio.TimeoutError, asyncio.CancelledError):
             logger.info("Screenshot queue drained or reached timeout.")
 

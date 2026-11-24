@@ -152,15 +152,15 @@ export default function ScanResults() {
   const safeResults = Array.isArray(results) ? results : [];
   const total = safeResults.length;
   const online = safeResults.filter(r => r.status === 'ONLINE').length;
-  const offline = safeResults.filter(r => r.status === 'OFFLINE').length;
-  const errors = total - (online + offline);
+  const offline = safeResults.filter(r => r.status === 'OFFLINE' || r.status === 'TIMEOUT').length;
+  const errors = safeResults.filter(r => r.status !== 'ONLINE' && r.status !== 'OFFLINE' && r.status !== 'TIMEOUT').length;
   const isScanning = scan?.status === 'running' || scan?.status === 'pending';
 
   // Filtered targets
   const filteredResults = safeResults.filter(item => {
     if (statusFilter === 'ONLINE' && item.status !== 'ONLINE') return false;
-    if (statusFilter === 'OFFLINE' && item.status !== 'OFFLINE') return false;
-    if (statusFilter === 'ERRORS' && (item.status === 'ONLINE' || item.status === 'OFFLINE')) return false;
+    if (statusFilter === 'OFFLINE' && item.status !== 'OFFLINE' && item.status !== 'TIMEOUT') return false;
+    if (statusFilter === 'ERRORS' && (item.status === 'ONLINE' || item.status === 'OFFLINE' || item.status === 'TIMEOUT')) return false;
 
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase().trim();
@@ -473,7 +473,7 @@ export default function ScanResults() {
             {offline}
           </div>
           <span className="text-[11px] text-rose-600/70 dark:text-rose-400/70 mt-0.5 block">
-            Filter offline ({Math.round(total ? (offline / total) * 100 : 0)}%)
+            Unreachable / timeout ({Math.round(total ? (offline / total) * 100 : 0)}%)
           </span>
         </button>
 
@@ -490,7 +490,7 @@ export default function ScanResults() {
             {errors}
           </div>
           <span className="text-[11px] text-amber-600/70 dark:text-amber-400/70 mt-0.5 block">
-            HTTP/DNS/SSL errors
+            HTTP 4xx/5xx, DNS, SSL ({Math.round(total ? (errors / total) * 100 : 0)}%)
           </span>
         </button>
       </div>

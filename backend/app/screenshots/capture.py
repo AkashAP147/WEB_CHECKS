@@ -425,9 +425,10 @@ class BrowserWorkerPool:
                                 except Exception:
                                     pass
 
-                            if not navigated:
+                            # Only try HTTP fallback if primary was HTTPS and target was NOT already marked TIMEOUT
+                            if not navigated and primary_url.startswith("https://") and not (status_info and status_info.get("status") == "TIMEOUT"):
                                 try:
-                                    nav_resp = page.goto(alt_url, wait_until="domcontentloaded", timeout=max(3000, timeout_ms - 2000))
+                                    nav_resp = page.goto(alt_url, wait_until="domcontentloaded", timeout=2500)
                                     navigated = True
                                 except Exception:
                                     try:
@@ -602,13 +603,14 @@ class ScreenshotCapture:
                     "status_code": status_info.get("http_status_code") if status_info else None,
                 }
 
-            # For reachable / active targets: capture through persistent browser pool
+            # Fast 3500ms timeout for targets already marked TIMEOUT; 5000ms for ONLINE
+            nav_timeout = 3500 if status == "TIMEOUT" else 5000
             pool = get_browser_pool()
             res = await pool.capture(
                 url=url,
                 abs_path=abs_path,
                 viewport=self.DEFAULT_VIEWPORT,
-                timeout_ms=self.DEFAULT_NAV_TIMEOUT_MS,
+                timeout_ms=nav_timeout,
                 status_info=status_info,
             )
 

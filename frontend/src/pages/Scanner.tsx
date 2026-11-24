@@ -159,9 +159,9 @@ export default function Scanner() {
           : statusFilter === 'ONLINE'
           ? r.status === 'ONLINE'
           : statusFilter === 'OFFLINE'
-          ? r.status === 'OFFLINE'
+          ? r.status === 'OFFLINE' || r.status === 'TIMEOUT'
           : statusFilter === 'ERRORS'
-          ? r.status !== 'ONLINE'
+          ? r.status !== 'ONLINE' && r.status !== 'OFFLINE' && r.status !== 'TIMEOUT'
           : r.status === statusFilter;
 
       return matchesSearch && matchesStatus;
