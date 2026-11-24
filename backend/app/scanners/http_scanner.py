@@ -10,8 +10,10 @@ from __future__ import annotations
 import re
 import time
 import asyncio
+import ssl
 from dataclasses import dataclass, field
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -19,6 +21,8 @@ from backend.app.utils.url_validator import (
     resolve_and_check,
     validate_redirect_target,
     validate_url,
+    _is_ip_literal,
+    _is_ip_safe,
 )
 
 # ---------------------------------------------------------------------------
@@ -185,20 +189,11 @@ class HttpScanner:
             elapsed = (time.monotonic() - start) * 1000
 
         # -- Error classification --------------------------------------------
-        except httpx.ConnectTimeout as exc:
+        except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout, httpx.TimeoutException) as exc:
             elapsed = (time.monotonic() - start) * 1000
             result["response_time_ms"] = round(elapsed, 2)
-            result["status"] = STATUS_OFFLINE
+            result["status"] = STATUS_TIMEOUT
             result["error_message"] = "Host unreachable: connection timed out."
-            result["redirect_chain"] = redirect_chain
-            result["is_redirect"] = bool(redirect_chain)
-            return result
-
-        except httpx.TimeoutException as exc:
-            elapsed = (time.monotonic() - start) * 1000
-            result["response_time_ms"] = round(elapsed, 2)
-            result["status"] = STATUS_OFFLINE
-            result["error_message"] = "Host unreachable: request timed out."
             result["redirect_chain"] = redirect_chain
             result["is_redirect"] = bool(redirect_chain)
             return result
@@ -277,7 +272,7 @@ def _classify_exception(exc: Exception) -> tuple[str, str]:
     exc_msg = str(exc)
 
     if isinstance(exc, (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout, httpx.TimeoutException)):
-        return STATUS_OFFLINE, f"Host unreachable: connection timed out ({exc_type})"
+        return STATUS_TIMEOUT, f"Host unreachable: connection timed out ({exc_type})"
 
     if isinstance(exc, httpx.ConnectError):
         lower = exc_msg.lower()

@@ -270,8 +270,9 @@ def _sync_capture_worker(
                             alt_url = f"http://{url}"
 
                     navigated = False
+                    nav_resp = None
                     try:
-                        page.goto(primary_url, wait_until="domcontentloaded", timeout=6000)
+                        nav_resp = page.goto(primary_url, wait_until="domcontentloaded", timeout=8000)
                         navigated = True
                     except Exception:
                         try:
@@ -283,7 +284,7 @@ def _sync_capture_worker(
 
                     if not navigated:
                         try:
-                            page.goto(alt_url, wait_until="domcontentloaded", timeout=5000)
+                            nav_resp = page.goto(alt_url, wait_until="domcontentloaded", timeout=7000)
                             navigated = True
                         except Exception:
                             try:
@@ -295,7 +296,8 @@ def _sync_capture_worker(
 
                     if navigated:
                         try:
-                            page.wait_for_timeout(500)
+                            # Wait for client-side rendering / hydration
+                            page.wait_for_timeout(800)
                         except Exception:
                             pass
                         page.screenshot(path=abs_path, full_page=False, type="png")
@@ -305,7 +307,22 @@ def _sync_capture_worker(
                                 out_details["browser_captured"] = True
                                 try:
                                     out_details["final_url"] = str(page.url)
-                                    out_details["title"] = str(page.title())
+                                    title = None
+                                    try:
+                                        title = str(page.title()).strip()
+                                    except Exception:
+                                        pass
+                                    if not title:
+                                        try:
+                                            title = str(page.evaluate("() => document.title || document.querySelector('h1')?.innerText || ''")).strip()
+                                        except Exception:
+                                            pass
+                                    if title:
+                                        out_details["title"] = title
+                                    if nav_resp:
+                                        out_details["status_code"] = nav_resp.status
+                                    else:
+                                        out_details["status_code"] = 200
                                 except Exception:
                                     pass
                 finally:
@@ -329,7 +346,7 @@ class ScreenshotCapture:
     """
 
     DEFAULT_VIEWPORT = {"width": 1440, "height": 900}
-    DEFAULT_NAV_TIMEOUT_MS = 8_000
+    DEFAULT_NAV_TIMEOUT_MS = 10_000
 
     def __init__(self, screenshots_dir: str | None = None) -> None:
         self.screenshots_dir = screenshots_dir or settings.screenshots_dir
@@ -391,6 +408,7 @@ class ScreenshotCapture:
                     "browser_captured": out_details.get("browser_captured", False),
                     "final_url": out_details.get("final_url"),
                     "title": out_details.get("title"),
+                    "status_code": out_details.get("status_code"),
                 }
             else:
                 # Emergency fallback

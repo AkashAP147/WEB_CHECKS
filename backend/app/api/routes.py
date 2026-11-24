@@ -143,13 +143,13 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         _ssl_memory_cache: Dict[str, dict | None] = {}
 
         # Concurrency control:
-        # 1. URL network worker concurrency: 80 on Windows (100 on Linux/Colab) for ultra-fast scanning
-        default_concurrency = 80 if sys.platform == "win32" else 100
+        # 1. URL network worker concurrency: 60 on Windows (80 on Linux/Colab) for high stability & speed
+        default_concurrency = 60 if sys.platform == "win32" else 80
         concurrency_limit = min(settings.max_concurrent_scans, default_concurrency)
         url_semaphore = asyncio.Semaphore(concurrency_limit)
 
-        # 2. Screenshot concurrency: 8 parallel browser workers
-        screenshot_limit = 8
+        # 2. Screenshot concurrency: 10 parallel browser workers
+        screenshot_limit = 10
         screenshot_semaphore = asyncio.Semaphore(screenshot_limit)
 
         # -----------------------------------------------------------------------
@@ -216,16 +216,16 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                 try:
                     return await asyncio.wait_for(
                         http_scanner.scan_url(raw_url, client=client),
-                        timeout=8.0,
+                        timeout=12.0,
                     )
                 except asyncio.TimeoutError:
                     return {
                         "original_url": raw_url,
                         "final_url": raw_url,
                         "domain": tentative_domain,
-                        "status": "OFFLINE",
+                        "status": "TIMEOUT",
                         "http_status_code": None,
-                        "response_time_ms": 8000.0,
+                        "response_time_ms": 12000.0,
                         "server_info": None,
                         "website_title": None,
                         "error_message": "Host unreachable (connection timed out).",
@@ -287,9 +287,9 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                 status = http_res.get("status")
                 target_to_capture = http_res.get("final_url") or raw_url
 
-                # Fast short-circuit: DNS errors and HTTP errors (404, 503, etc.)
-                # Generates instant crisp diagnostic card in 1ms without launching heavy Chromium!
-                if status in ("DNS_ERROR", "HTTP_ERROR"):
+                # Fast short-circuit: ONLY HTTP errors where the server explicitly answered with 4xx or 5xx.
+                # All other states (DNS_ERROR, OFFLINE, TIMEOUT) proceed to browser verification to ensure no false negatives!
+                if status == "HTTP_ERROR":
                     try:
                         filename = _build_filename(scan_id, target_to_capture)
                         abs_path = os.path.join(settings.screenshots_dir, filename)
@@ -321,21 +321,28 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                             scan_id,
                             status_info=http_res,
                         ),
-                        timeout=12.0,
+                        timeout=18.0,
                     )
                 if ss_res.get("success"):
                     screenshot_path = ss_res.get("screenshot_path")
-                    # If Chromium successfully navigated, only upgrade to ONLINE if NOT an HTTP error
+                    # If Chromium successfully navigated, extract loaded page data and upgrade to ONLINE
                     if ss_res.get("browser_captured"):
-                        if not (http_res.get("http_status_code") and http_res["http_status_code"] >= 400):
+                        browser_status = ss_res.get("status_code")
+                        http_status = http_res.get("http_status_code")
+                        final_status = browser_status or http_status or 200
+
+                        if final_status < 400:
                             http_res["status"] = "ONLINE"
+                            http_res["error_message"] = None
+                        elif final_status >= 400:
+                            http_res["status"] = "HTTP_ERROR"
+                            http_res["error_message"] = f"HTTP {final_status}: site returned error."
+
+                        http_res["http_status_code"] = final_status
                         if ss_res.get("final_url"):
                             http_res["final_url"] = ss_res["final_url"]
-                        if ss_res.get("title") and not http_res.get("website_title"):
+                        if ss_res.get("title") and (not http_res.get("website_title") or http_res["website_title"] in ("Untitled", "")):
                             http_res["website_title"] = ss_res["title"]
-                        if not http_res.get("http_status_code"):
-                            http_res["http_status_code"] = 200
-                        http_res["error_message"] = None
             except Exception as ss_err:
                 logger.debug("Screenshot error for %s: %s", raw_url, ss_err)
 
@@ -365,7 +372,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         limits = httpx.Limits(max_connections=500, max_keepalive_connections=250)
         async with httpx.AsyncClient(
             limits=limits,
-            timeout=httpx.Timeout(connect=2.5, read=5.0, write=3.0, pool=None),
+            timeout=httpx.Timeout(connect=5.0, read=8.0, write=5.0, pool=None),
             follow_redirects=False,
             verify=False,
             headers={
@@ -373,7 +380,9 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/124.0.0.0 Safari/537.36"
-                )
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
             },
         ) as shared_client:
             await asyncio.gather(*[scan_single_url(u, shared_client) for u in urls])
