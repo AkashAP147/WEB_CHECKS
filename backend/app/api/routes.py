@@ -210,7 +210,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                 try:
                     return await asyncio.wait_for(
                         http_scanner.scan_url(raw_url, client=client),
-                        timeout=8.0,
+                        timeout=10.0,
                     )
                 except asyncio.TimeoutError:
                     return {
@@ -219,7 +219,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                         "domain": tentative_domain,
                         "status": "TIMEOUT",
                         "http_status_code": None,
-                        "response_time_ms": 8000.0,
+                        "response_time_ms": 10000.0,
                         "server_info": None,
                         "website_title": None,
                         "error_message": "Host unreachable (connection timed out).",
@@ -302,6 +302,27 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                     http_res["website_title"] = ss_res["title"]
                 if ss_res.get("final_url") and not http_res.get("final_url"):
                     http_res["final_url"] = ss_res["final_url"]
+
+                # If Chromium successfully loaded and rendered the webpage:
+                # The website is PROVABLY active and reachable (NEVER mark as TIMEOUT or OFFLINE)!
+                if ss_res.get("browser_captured"):
+                    sc_code = ss_res.get("status_code") or 200
+                    if not http_res.get("http_status_code") or http_res.get("http_status_code") == 0:
+                        http_res["http_status_code"] = sc_code
+
+                    if sc_code >= 400:
+                        http_res["status"] = "HTTP_ERROR"
+                        http_res["error_message"] = f"HTTP {sc_code}: server returned client/server error."
+                    else:
+                        http_res["status"] = "ONLINE"
+                        http_res["error_message"] = None
+
+                    # If DNS / SSL were skipped due to initial transient socket timeout, run them now:
+                    if not dns_records and not ssl_data:
+                        try:
+                            dns_records, ssl_data = await asyncio.gather(run_dns(), run_ssl())
+                        except Exception:
+                            pass
             except Exception as ss_err:
                 logger.debug("Screenshot capture error for %s: %s", raw_url, ss_err)
                 http_res["screenshot_path"] = None
@@ -313,7 +334,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         limits = httpx.Limits(max_connections=600, max_keepalive_connections=300)
         async with httpx.AsyncClient(
             limits=limits,
-            timeout=httpx.Timeout(connect=3.0, read=5.0, write=3.0, pool=None),
+            timeout=httpx.Timeout(connect=5.0, read=7.0, write=5.0, pool=None),
             follow_redirects=False,
             verify=False,
             headers={

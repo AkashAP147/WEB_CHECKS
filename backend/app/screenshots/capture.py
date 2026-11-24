@@ -474,8 +474,8 @@ class ScreenshotCapture:
 
             status = (status_info.get("status") or "").upper() if status_info else ""
 
-            # If site is confirmed completely unreachable (DNS failed or connection dead), don't waste 8s in Chromium
-            if status in ("OFFLINE", "DNS_ERROR"):
+            # Only skip Chromium if domain completely failed DNS resolution (NXDOMAIN)
+            if status == "DNS_ERROR":
                 generate_diagnostic_screenshot(abs_path, url, status_info)
                 elapsed = (time.perf_counter() - start) * 1000
                 return {
