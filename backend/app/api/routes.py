@@ -173,8 +173,8 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         _ssl_memory_cache: Dict[str, dict | None] = {}
 
         # Concurrency control:
-        # 1. URL network worker concurrency: 40 on Windows (60 on Linux/Colab)
-        default_concurrency = 40 if sys.platform == "win32" else 60
+        # 1. URL network worker concurrency: 100 on Windows (150 on Linux/Colab)
+        default_concurrency = 100 if sys.platform == "win32" else 150
         concurrency_limit = min(settings.max_concurrent_scans, default_concurrency)
         url_semaphore = asyncio.Semaphore(concurrency_limit)
 
@@ -235,98 +235,99 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
             if scan_id not in _running_tasks:
                 return
 
+            try:
+                parsed = urlparse(raw_url if "://" in raw_url else f"https://{raw_url}")
+                tentative_domain = (parsed.netloc or parsed.path).split(":")[0].split("/")[0]
+            except Exception:
+                tentative_domain = raw_url.replace("https://", "").replace("http://", "").split("/")[0]
+
+            # Daily URL cache check: fast in-memory lookup (zero DB overhead)
+            cache_key = raw_url.lower().strip()
+            cached_res = _daily_cache.get(cache_key)
+            if not cached_res and tentative_domain:
+                cached_res = _daily_cache.get(tentative_domain.lower().strip())
+
+            if cached_res:
+                reused_res = {
+                    "original_url": raw_url,
+                    "final_url": cached_res.get("final_url") or raw_url,
+                    "domain": cached_res.get("domain") or tentative_domain,
+                    "status": cached_res.get("status", "ONLINE"),
+                    "http_status_code": cached_res.get("http_status_code"),
+                    "response_time_ms": cached_res.get("response_time_ms"),
+                    "server_info": cached_res.get("server_info"),
+                    "website_title": cached_res.get("website_title"),
+                    "screenshot_path": cached_res.get("screenshot_path"),
+                    "error_message": cached_res.get("error_message"),
+                }
+                await db_queue.put((reused_res, [], None))
+                return
+
+            # Coroutines for network operations:
+            async def run_http():
+                try:
+                    return await asyncio.wait_for(
+                        http_scanner.scan_url(raw_url, client=client),
+                        timeout=8.0,
+                    )
+                except asyncio.TimeoutError:
+                    return {
+                        "original_url": raw_url,
+                        "final_url": raw_url,
+                        "domain": tentative_domain,
+                        "status": "TIMEOUT",
+                        "http_status_code": None,
+                        "response_time_ms": 8000.0,
+                        "server_info": None,
+                        "website_title": None,
+                        "error_message": "HTTP request timed out after 8 seconds.",
+                        "screenshot_path": None,
+                    }
+                except Exception as exc:
+                    return {
+                        "original_url": raw_url,
+                        "final_url": raw_url,
+                        "domain": tentative_domain,
+                        "status": "OFFLINE",
+                        "http_status_code": None,
+                        "response_time_ms": None,
+                        "server_info": None,
+                        "website_title": None,
+                        "error_message": str(exc),
+                        "screenshot_path": None,
+                    }
+
+            async def run_dns():
+                if tentative_domain in _dns_memory_cache:
+                    return _dns_memory_cache[tentative_domain]
+                try:
+                    res = await asyncio.wait_for(
+                        dns_analyzer.analyze(tentative_domain),
+                        timeout=3.5,
+                    )
+                    recs = res.get("records", [])
+                    _dns_memory_cache[tentative_domain] = recs
+                    return recs
+                except Exception:
+                    return []
+
+            async def run_ssl():
+                if tentative_domain in _ssl_memory_cache:
+                    return _ssl_memory_cache[tentative_domain]
+                try:
+                    res = await asyncio.wait_for(
+                        ssl_checker.check(tentative_domain),
+                        timeout=3.5,
+                    )
+                    _ssl_memory_cache[tentative_domain] = res
+                    return res
+                except Exception:
+                    return None
+
+            # --- PHASE 1: FAST NETWORK AUDIT (Holds url_semaphore ONLY during network I/O) ---
             async with url_semaphore:
                 if scan_id not in _running_tasks:
                     return
-
-                try:
-                    parsed = urlparse(raw_url if "://" in raw_url else f"https://{raw_url}")
-                    tentative_domain = (parsed.netloc or parsed.path).split(":")[0].split("/")[0]
-                except Exception:
-                    tentative_domain = raw_url.replace("https://", "").replace("http://", "").split("/")[0]
-
-                # Daily URL cache check: fast in-memory lookup (zero DB overhead)
-                cache_key = raw_url.lower().strip()
-                cached_res = _daily_cache.get(cache_key)
-                if not cached_res and tentative_domain:
-                    cached_res = _daily_cache.get(tentative_domain.lower().strip())
-
-                if cached_res:
-                    reused_res = {
-                        "original_url": raw_url,
-                        "final_url": cached_res.get("final_url") or raw_url,
-                        "domain": cached_res.get("domain") or tentative_domain,
-                        "status": cached_res.get("status", "ONLINE"),
-                        "http_status_code": cached_res.get("http_status_code"),
-                        "response_time_ms": cached_res.get("response_time_ms"),
-                        "server_info": cached_res.get("server_info"),
-                        "website_title": cached_res.get("website_title"),
-                        "screenshot_path": cached_res.get("screenshot_path"),
-                        "error_message": cached_res.get("error_message"),
-                    }
-                    await db_queue.put((reused_res, [], None))
-                    return
-
-                # 1, 2, 3: Run HTTP, DNS, and SSL in parallel with strict bounded timeouts
-                async def run_http():
-                    try:
-                        return await asyncio.wait_for(
-                            http_scanner.scan_url(raw_url, client=client),
-                            timeout=15.0,
-                        )
-                    except asyncio.TimeoutError:
-                        return {
-                            "original_url": raw_url,
-                            "final_url": raw_url,
-                            "domain": tentative_domain,
-                            "status": "TIMEOUT",
-                            "http_status_code": None,
-                            "response_time_ms": 15000.0,
-                            "server_info": None,
-                            "website_title": None,
-                            "error_message": "HTTP request timed out after 15 seconds.",
-                            "screenshot_path": None,
-                        }
-                    except Exception as exc:
-                        return {
-                            "original_url": raw_url,
-                            "final_url": raw_url,
-                            "domain": tentative_domain,
-                            "status": "OFFLINE",
-                            "http_status_code": None,
-                            "response_time_ms": None,
-                            "server_info": None,
-                            "website_title": None,
-                            "error_message": str(exc),
-                            "screenshot_path": None,
-                        }
-
-                async def run_dns():
-                    if tentative_domain in _dns_memory_cache:
-                        return _dns_memory_cache[tentative_domain]
-                    try:
-                        res = await asyncio.wait_for(
-                            dns_analyzer.analyze(tentative_domain),
-                            timeout=6.0,
-                        )
-                        recs = res.get("records", [])
-                        _dns_memory_cache[tentative_domain] = recs
-                        return recs
-                    except Exception:
-                        return []
-
-                async def run_ssl():
-                    if tentative_domain in _ssl_memory_cache:
-                        return _ssl_memory_cache[tentative_domain]
-                    try:
-                        res = await asyncio.wait_for(
-                            ssl_checker.check(tentative_domain),
-                            timeout=6.0,
-                        )
-                        _ssl_memory_cache[tentative_domain] = res
-                        return res
-                    except Exception:
-                        return None
 
                 http_res = await run_http()
 
@@ -356,46 +357,48 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                 # For ONLINE sites: run DNS and SSL concurrently
                 dns_records, ssl_data = await asyncio.gather(run_dns(), run_ssl())
 
-                # Smart Screenshot Dispatch with bounded timeout
-                screenshot_path = None
+            # url_semaphore IS RELEASED! Other 100+ network workers immediately scan the next URLs!
+
+            # --- PHASE 2: PARALLEL SCREENSHOT DISPATCH (Independent semaphore) ---
+            screenshot_path = None
+            try:
+                async with screenshot_semaphore:
+                    ss_res = await asyncio.wait_for(
+                        screenshot_capturer.capture(
+                            target_to_capture,
+                            scan_id,
+                            status_info=http_res,
+                        ),
+                        timeout=20.0,
+                    )
+                if ss_res.get("success"):
+                    screenshot_path = ss_res.get("screenshot_path")
+            except Exception as ss_err:
+                logger.debug("Screenshot error for %s: %s", raw_url, ss_err)
+
+            # Fallback diagnostic snapshot if browser screenshot failed
+            if not screenshot_path:
                 try:
-                    async with screenshot_semaphore:
-                        ss_res = await asyncio.wait_for(
-                            screenshot_capturer.capture(
-                                target_to_capture,
-                                scan_id,
-                                status_info=http_res,
-                            ),
-                            timeout=25.0,
-                        )
-                    if ss_res.get("success"):
-                        screenshot_path = ss_res.get("screenshot_path")
-                except Exception as ss_err:
-                    logger.debug("Screenshot error for %s: %s", raw_url, ss_err)
+                    filename = _build_filename(scan_id, target_to_capture)
+                    abs_path = os.path.join(settings.screenshots_dir, filename)
+                    created = await asyncio.to_thread(
+                        generate_diagnostic_screenshot, abs_path, target_to_capture, http_res
+                    )
+                    if created:
+                        screenshot_path = f"screenshots/{filename}"
+                except Exception:
+                    pass
 
-                # Fallback diagnostic snapshot if browser screenshot failed
-                if not screenshot_path:
-                    try:
-                        filename = _build_filename(scan_id, target_to_capture)
-                        abs_path = os.path.join(settings.screenshots_dir, filename)
-                        created = await asyncio.to_thread(
-                            generate_diagnostic_screenshot, abs_path, target_to_capture, http_res
-                        )
-                        if created:
-                            screenshot_path = f"screenshots/{filename}"
-                    except Exception:
-                        pass
+            http_res["screenshot_path"] = screenshot_path
 
-                http_res["screenshot_path"] = screenshot_path
+            # Push to DB batch queue (non-blocking instant hand-off)
+            await db_queue.put((http_res, dns_records, ssl_data))
 
-                # Push to DB batch queue (non-blocking instant hand-off)
-                await db_queue.put((http_res, dns_records, ssl_data))
-
-        # Main Scan Execution Loop with Shared Persistent HTTP Client
-        limits = httpx.Limits(max_connections=400, max_keepalive_connections=150)
+        # Main Scan Execution Loop with Shared High-Throughput Persistent HTTP Client
+        limits = httpx.Limits(max_connections=500, max_keepalive_connections=250)
         async with httpx.AsyncClient(
             limits=limits,
-            timeout=httpx.Timeout(connect=15.0, read=15.0, write=15.0, pool=30.0),
+            timeout=httpx.Timeout(connect=6.0, read=8.0, write=6.0, pool=15.0),
             follow_redirects=False,
             verify=True,
             headers={
