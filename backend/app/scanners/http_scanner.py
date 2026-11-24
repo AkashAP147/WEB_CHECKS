@@ -37,7 +37,7 @@ STATUS_SSRF_BLOCKED = "SSRF_BLOCKED"
 MAX_REDIRECTS = 5
 
 # Default request timeout in seconds (optimized for fast parallel discovery).
-DEFAULT_TIMEOUT = 10.0
+DEFAULT_TIMEOUT = 7.0
 
 # Regex to pull <title> from an HTML document.
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
@@ -243,15 +243,12 @@ class HttpScanner:
         code = response.status_code
         if 200 <= code < 400:
             result["status"] = STATUS_ONLINE
-        elif redirect_chain or result.get("is_redirect"):
-            # Any target that successfully redirected to another location is considered ONLINE
-            result["status"] = STATUS_ONLINE
-        elif code in (403, 404, 451):
+        elif code in (400, 401, 403, 404, 405, 410, 429, 451):
             result["status"] = STATUS_HTTP_ERROR
-            result["error_message"] = f"HTTP {code}: site is responding but returned an error."
+            result["error_message"] = f"HTTP {code}: site returned client error."
         elif 500 <= code < 600:
             result["status"] = STATUS_HTTP_ERROR
-            result["error_message"] = f"Server error: HTTP {code}"
+            result["error_message"] = f"HTTP {code}: server error."
         else:
             result["status"] = STATUS_HTTP_ERROR
             result["error_message"] = f"Unexpected HTTP status: {code}"

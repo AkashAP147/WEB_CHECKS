@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS scans (
                         CHECK (status IN ('pending', 'running', 'completed', 'cancelled', 'failed')),
     total_urls      INTEGER NOT NULL DEFAULT 0,
     completed_urls  INTEGER NOT NULL DEFAULT 0,
-    progress_pct    REAL NOT NULL DEFAULT 0.0
+    progress_pct    REAL NOT NULL DEFAULT 0.0,
+    filename        TEXT
 );
 """
 
@@ -122,6 +123,13 @@ async def init_db(db_path: str | None = None) -> None:
         await db.execute(_CREATE_DNS_RECORDS)
         await db.execute(_CREATE_SSL_DETAILS)
         await db.executescript(_CREATE_INDICES)
+
+        # Ensure 'filename' column exists in existing 'scans' tables
+        try:
+            await db.execute("ALTER TABLE scans ADD COLUMN filename TEXT;")
+        except Exception:
+            pass  # column already exists
+
         await db.commit()
 
 

@@ -35,15 +35,20 @@ def _utcnow_iso() -> str:
 # Scans
 # ---------------------------------------------------------------------------
 
-async def create_scan(db: aiosqlite.Connection, scan_id: str, total_urls: int) -> dict:
+async def create_scan(
+    db: aiosqlite.Connection,
+    scan_id: str,
+    total_urls: int,
+    filename: Optional[str] = None,
+) -> dict:
     """Insert a new scan row and return it as a dict."""
     now = _utcnow_iso()
     await db.execute(
         """
-        INSERT INTO scans (id, created_at, status, total_urls, completed_urls, progress_pct)
-        VALUES (?, ?, 'pending', ?, 0, 0.0)
+        INSERT INTO scans (id, created_at, status, total_urls, completed_urls, progress_pct, filename)
+        VALUES (?, ?, 'pending', ?, 0, 0.0, ?)
         """,
-        (scan_id, now, total_urls),
+        (scan_id, now, total_urls, filename),
     )
     await db.commit()
     return {
@@ -53,6 +58,7 @@ async def create_scan(db: aiosqlite.Connection, scan_id: str, total_urls: int) -
         "total_urls": total_urls,
         "completed_urls": 0,
         "progress_pct": 0.0,
+        "filename": filename,
     }
 
 
@@ -322,6 +328,7 @@ async def get_scan_history(
             s.created_at,
             s.total_urls,
             s.status,
+            s.filename,
             COALESCE(SUM(CASE WHEN sr.status = 'ONLINE' THEN 1 ELSE 0 END), 0)       AS online_count,
             COALESCE(SUM(CASE WHEN sr.status = 'OFFLINE' THEN 1 ELSE 0 END), 0)       AS offline_count,
             COALESCE(SUM(CASE WHEN sr.status = 'DNS_ERROR' THEN 1 ELSE 0 END), 0)     AS dns_errors,
@@ -335,8 +342,8 @@ async def get_scan_history(
     clauses: list[str] = []
 
     if search:
-        clauses.append("sr.original_url LIKE ?")
-        params.append(f"%{search}%")
+        clauses.append("(sr.original_url LIKE ? OR s.filename LIKE ?)")
+        params.extend([f"%{search}%", f"%{search}%"])
 
     if status_filter:
         clauses.append("s.status = ?")

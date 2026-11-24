@@ -186,7 +186,7 @@ def _sync_capture_worker(
     url: str,
     abs_path: str,
     viewport: dict,
-    timeout_ms: int = 20000,
+    timeout_ms: int = 8000,
     status_info: Optional[Dict[str, Any]] = None,
     out_details: Optional[Dict[str, Any]] = None,
 ) -> None:
@@ -271,7 +271,7 @@ def _sync_capture_worker(
 
                     navigated = False
                     try:
-                        page.goto(primary_url, wait_until="domcontentloaded", timeout=12000)
+                        page.goto(primary_url, wait_until="domcontentloaded", timeout=6000)
                         navigated = True
                     except Exception:
                         try:
@@ -283,7 +283,7 @@ def _sync_capture_worker(
 
                     if not navigated:
                         try:
-                            page.goto(alt_url, wait_until="domcontentloaded", timeout=10000)
+                            page.goto(alt_url, wait_until="domcontentloaded", timeout=5000)
                             navigated = True
                         except Exception:
                             try:
@@ -295,7 +295,7 @@ def _sync_capture_worker(
 
                     if navigated:
                         try:
-                            page.wait_for_timeout(1500)
+                            page.wait_for_timeout(500)
                         except Exception:
                             pass
                         page.screenshot(path=abs_path, full_page=False, type="png")
@@ -329,7 +329,7 @@ class ScreenshotCapture:
     """
 
     DEFAULT_VIEWPORT = {"width": 1440, "height": 900}
-    DEFAULT_NAV_TIMEOUT_MS = 20_000
+    DEFAULT_NAV_TIMEOUT_MS = 8_000
 
     def __init__(self, screenshots_dir: str | None = None) -> None:
         self.screenshots_dir = screenshots_dir or settings.screenshots_dir

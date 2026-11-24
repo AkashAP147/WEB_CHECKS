@@ -60,6 +60,7 @@ export interface Scan {
   total_urls: number;
   completed_urls: number;
   progress_pct?: number;
+  filename?: string | null;
   results?: ScanResult[];
 }
 
@@ -73,6 +74,7 @@ export interface ScanHistoryItem {
   offline_count: number;
   dns_errors: number;
   ssl_issues: number;
+  filename?: string | null;
 }
 
 export interface DashboardStats {

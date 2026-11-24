@@ -143,13 +143,13 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         _ssl_memory_cache: Dict[str, dict | None] = {}
 
         # Concurrency control:
-        # 1. URL network worker concurrency: 50 on Windows (75 on Linux/Colab) for high-speed scanning
-        default_concurrency = 50 if sys.platform == "win32" else 75
+        # 1. URL network worker concurrency: 80 on Windows (100 on Linux/Colab) for ultra-fast scanning
+        default_concurrency = 80 if sys.platform == "win32" else 100
         concurrency_limit = min(settings.max_concurrent_scans, default_concurrency)
         url_semaphore = asyncio.Semaphore(concurrency_limit)
 
-        # 2. Screenshot concurrency: 4 to prevent CPU starvation on 2-vCPU Colab & Windows
-        screenshot_limit = 4
+        # 2. Screenshot concurrency: 8 parallel browser workers
+        screenshot_limit = 8
         screenshot_semaphore = asyncio.Semaphore(screenshot_limit)
 
         # -----------------------------------------------------------------------
@@ -216,7 +216,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                 try:
                     return await asyncio.wait_for(
                         http_scanner.scan_url(raw_url, client=client),
-                        timeout=12.0,
+                        timeout=8.0,
                     )
                 except asyncio.TimeoutError:
                     return {
@@ -225,10 +225,10 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                         "domain": tentative_domain,
                         "status": "OFFLINE",
                         "http_status_code": None,
-                        "response_time_ms": 12000.0,
+                        "response_time_ms": 8000.0,
                         "server_info": None,
                         "website_title": None,
-                        "error_message": "Host unreachable (connection timed out after 12 seconds).",
+                        "error_message": "Host unreachable (connection timed out).",
                         "screenshot_path": None,
                     }
                 except Exception as exc:
@@ -251,7 +251,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                 try:
                     res = await asyncio.wait_for(
                         dns_analyzer.analyze(tentative_domain),
-                        timeout=5.0,
+                        timeout=3.0,
                     )
                     recs = res.get("records", [])
                     _dns_memory_cache[tentative_domain] = recs
@@ -265,7 +265,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                 try:
                     res = await asyncio.wait_for(
                         ssl_checker.check(tentative_domain),
-                        timeout=5.0,
+                        timeout=3.0,
                     )
                     _ssl_memory_cache[tentative_domain] = res
                     return res
@@ -279,15 +279,17 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
 
                 http_res = await run_http()
 
-                # If site redirected to another location, consider it ONLINE
-                if http_res.get("is_redirect") or (http_res.get("final_url") and http_res.get("final_url").rstrip('/') != raw_url.rstrip('/')):
-                    http_res["status"] = "ONLINE"
+                # Guard: HTTP 4xx (404, 403) and 5xx (503, 500) must ALWAYS be HTTP_ERROR
+                code = http_res.get("http_status_code")
+                if code and code >= 400:
+                    http_res["status"] = "HTTP_ERROR"
 
                 status = http_res.get("status")
                 target_to_capture = http_res.get("final_url") or raw_url
 
-                # Only short-circuit DNS_ERROR (domain does not exist in DNS)
-                if status == "DNS_ERROR":
+                # Fast short-circuit: DNS errors and HTTP errors (404, 503, etc.)
+                # Generates instant crisp diagnostic card in 1ms without launching heavy Chromium!
+                if status in ("DNS_ERROR", "HTTP_ERROR"):
                     try:
                         filename = _build_filename(scan_id, target_to_capture)
                         abs_path = os.path.join(settings.screenshots_dir, filename)
@@ -319,13 +321,14 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                             scan_id,
                             status_info=http_res,
                         ),
-                        timeout=28.0,
+                        timeout=12.0,
                     )
                 if ss_res.get("success"):
                     screenshot_path = ss_res.get("screenshot_path")
-                    # If Chromium successfully navigated and captured the live page, upgrade to ONLINE
+                    # If Chromium successfully navigated, only upgrade to ONLINE if NOT an HTTP error
                     if ss_res.get("browser_captured"):
-                        http_res["status"] = "ONLINE"
+                        if not (http_res.get("http_status_code") and http_res["http_status_code"] >= 400):
+                            http_res["status"] = "ONLINE"
                         if ss_res.get("final_url"):
                             http_res["final_url"] = ss_res["final_url"]
                         if ss_res.get("title") and not http_res.get("website_title"):
@@ -362,7 +365,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         limits = httpx.Limits(max_connections=500, max_keepalive_connections=250)
         async with httpx.AsyncClient(
             limits=limits,
-            timeout=httpx.Timeout(connect=3.5, read=10.0, write=5.0, pool=None),
+            timeout=httpx.Timeout(connect=2.5, read=5.0, write=3.0, pool=None),
             follow_redirects=False,
             verify=False,
             headers={
@@ -452,6 +455,7 @@ async def start_scan(request: Request):
     """
     content_type = request.headers.get("content-type", "").lower()
     collected_urls: List[str] = []
+    original_filename: Optional[str] = None
 
     try:
         if "multipart/form-data" in content_type:
@@ -460,6 +464,7 @@ async def start_scan(request: Request):
             if uploaded_file and hasattr(uploaded_file, "read"):
                 contents = await uploaded_file.read()
                 filename = getattr(uploaded_file, "filename", "") or ""
+                original_filename = filename if filename else None
                 collected_urls = _extract_urls_from_file(contents, filename)
             else:
                 urls_val = form.getlist("urls") or form.get("urls")
@@ -516,7 +521,7 @@ async def start_scan(request: Request):
     created_at = _now_iso()
 
     async with get_db() as db:
-        await create_scan(db, scan_id=scan_id, total_urls=len(validated))
+        await create_scan(db, scan_id=scan_id, total_urls=len(validated), filename=original_filename)
 
     # Launch background scan
     task = asyncio.create_task(_run_scan(scan_id, validated))
@@ -527,6 +532,7 @@ async def start_scan(request: Request):
         "status": "pending",
         "total_urls": len(validated),
         "created_at": created_at,
+        "filename": original_filename,
     }
 
 
@@ -542,6 +548,7 @@ async def start_scan_json(payload: Dict[str, Any]):
     """
     urls = payload.get("urls")
     url = payload.get("url")
+    custom_filename = payload.get("filename")
     collected: List[str] = []
 
     if urls and isinstance(urls, list):
@@ -570,7 +577,7 @@ async def start_scan_json(payload: Dict[str, Any]):
     scan_id = str(uuid.uuid4())
     created_at = _now_iso()
     async with get_db() as db:
-        await create_scan(db, scan_id=scan_id, total_urls=len(validated))
+        await create_scan(db, scan_id=scan_id, total_urls=len(validated), filename=custom_filename)
 
     task = asyncio.create_task(_run_scan(scan_id, validated))
     _running_tasks[scan_id] = task
@@ -580,6 +587,7 @@ async def start_scan_json(payload: Dict[str, Any]):
         "status": "pending",
         "total_urls": len(validated),
         "created_at": created_at,
+        "filename": custom_filename,
     }
 
 
@@ -644,8 +652,8 @@ async def scan_history(
         params = []
         if search:
             count_query += " LEFT JOIN scan_results sr ON sr.scan_id = s.id"
-            clauses.append("sr.original_url LIKE ?")
-            params.append(f"%{search}%")
+            clauses.append("(sr.original_url LIKE ? OR s.filename LIKE ?)")
+            params.extend([f"%{search}%", f"%{search}%"])
         if status:
             clauses.append("s.status = ?")
             params.append(status)

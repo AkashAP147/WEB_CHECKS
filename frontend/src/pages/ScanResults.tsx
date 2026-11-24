@@ -179,10 +179,16 @@ export default function ScanResults() {
             <ArrowLeft className="w-4 h-4" />
           </button>
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <h2 className="text-xl font-bold text-surface-900 dark:text-white">
                 Audit Diagnostics
               </h2>
+              {scan?.filename && (
+                <span className="text-xs px-2.5 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 font-medium flex items-center gap-1 border border-emerald-200 dark:border-emerald-800">
+                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                  {scan.filename}
+                </span>
+              )}
               <span className="font-mono text-xs px-2 py-0.5 rounded bg-surface-100 dark:bg-surface-800 text-surface-600 dark:text-surface-300">
                 {scanId}
               </span>

@@ -284,7 +284,7 @@ export default function History() {
           <table className="data-table">
             <thead>
               <tr>
-                <th>Scan ID</th>
+                <th>Audit / File Name</th>
                 <th>Executed At</th>
                 <th>Targets</th>
                 <th>Online</th>
@@ -326,8 +326,26 @@ export default function History() {
                       className="hover:bg-surface-50 dark:hover:bg-surface-800/50 cursor-pointer"
                       onClick={() => navigate(`/scan/${item.scan_id}`)}
                     >
-                      <td className="font-mono text-xs font-semibold text-indigo-600 dark:text-indigo-400">
-                        {item.scan_id.substring(0, 8)}...
+                      <td>
+                        <div className="flex flex-col gap-0.5">
+                          {item.filename ? (
+                            <span
+                              className="font-semibold text-surface-900 dark:text-white flex items-center gap-1.5 text-xs truncate max-w-[240px]"
+                              title={item.filename}
+                            >
+                              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                              <span className="truncate">{item.filename}</span>
+                            </span>
+                          ) : (
+                            <span className="font-semibold text-surface-700 dark:text-surface-300 flex items-center gap-1.5 text-xs">
+                              <Globe className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                              <span>Direct Scan</span>
+                            </span>
+                          )}
+                          <span className="font-mono text-[10px] text-surface-400 dark:text-surface-500">
+                            ID: {item.scan_id.substring(0, 8)}...
+                          </span>
+                        </div>
                       </td>
                       <td className="text-xs text-surface-600 dark:text-surface-400">
                         {formatDate(item.created_at)}
