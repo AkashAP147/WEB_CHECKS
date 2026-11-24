@@ -348,17 +348,14 @@ def _sync_capture_worker(
                     except Exception:
                         pass
 
-                    # Smart protocol fallback: try http first if https timed out in network check
-                    if "://" in url:
-                        primary_url = url
-                        alt_url = url.replace("https://", "http://", 1) if url.startswith("https://") else url.replace("http://", "https://", 1)
+                    # Use final_url if verified by HTTP scanner
+                    target_url = (status_info.get("final_url") if status_info else None) or url
+                    if "://" in target_url:
+                        primary_url = target_url
+                        alt_url = target_url.replace("https://", "http://", 1) if target_url.startswith("https://") else target_url.replace("http://", "https://", 1)
                     else:
-                        if status_info and status_info.get("status") in ("TIMEOUT", "OFFLINE"):
-                            primary_url = f"http://{url}"
-                            alt_url = f"https://{url}"
-                        else:
-                            primary_url = f"https://{url}"
-                            alt_url = f"http://{url}"
+                        primary_url = f"https://{target_url}"
+                        alt_url = f"http://{target_url}"
 
                     navigated = False
                     nav_resp = None
@@ -465,8 +462,9 @@ class ScreenshotCapture:
         scan_id: str,
         status_info: Optional[Dict[str, Any]] = None,
     ) -> dict:
-        """Capture instant high-fidelity visual inspection card in pure Python memory (zero Chromium overhead)."""
+        """Capture real headless Chromium screenshot for online websites, with diagnostic fallback for dead hosts."""
         start = time.perf_counter()
+        out_details: Dict[str, Any] = {}
         try:
             # Ensure target directory exists
             Path(self.screenshots_dir).mkdir(parents=True, exist_ok=True)
@@ -474,11 +472,32 @@ class ScreenshotCapture:
             filename = _build_filename(scan_id, url)
             abs_path = os.path.join(self.screenshots_dir, filename)
 
-            # Fast 1ms visual card rendering in pure memory
-            generate_diagnostic_screenshot(
-                abs_path,
+            status = (status_info.get("status") or "").upper() if status_info else ""
+
+            # If site is confirmed completely unreachable (DNS failed or connection dead), don't waste 8s in Chromium
+            if status in ("OFFLINE", "DNS_ERROR"):
+                generate_diagnostic_screenshot(abs_path, url, status_info)
+                elapsed = (time.perf_counter() - start) * 1000
+                return {
+                    "success": True,
+                    "screenshot_path": f"screenshots/{filename}",
+                    "error_message": None,
+                    "capture_time_ms": round(elapsed, 2),
+                    "browser_captured": False,
+                    "final_url": status_info.get("final_url") if status_info else url,
+                    "title": status_info.get("website_title") if status_info else None,
+                    "status_code": status_info.get("http_status_code") if status_info else None,
+                }
+
+            # For ONLINE / reachable websites: launch real headless Chromium in worker thread
+            await asyncio.to_thread(
+                _sync_capture_worker,
                 url,
+                abs_path,
+                self.DEFAULT_VIEWPORT,
+                self.DEFAULT_NAV_TIMEOUT_MS,
                 status_info,
+                out_details,
             )
 
             elapsed = (time.perf_counter() - start) * 1000
@@ -488,22 +507,32 @@ class ScreenshotCapture:
                 "screenshot_path": rel_path,
                 "error_message": None,
                 "capture_time_ms": round(elapsed, 2),
-                "browser_captured": True,
-                "final_url": status_info.get("final_url") if status_info else url,
-                "title": status_info.get("website_title") if status_info else None,
-                "status_code": status_info.get("http_status_code") if status_info else 200,
+                "browser_captured": out_details.get("browser_captured", False),
+                "final_url": out_details.get("final_url") or (status_info.get("final_url") if status_info else url),
+                "title": out_details.get("title") or (status_info.get("website_title") if status_info else None),
+                "status_code": out_details.get("status_code") or (status_info.get("http_status_code") if status_info else 200),
             }
 
         except Exception as exc:
             elapsed = (time.perf_counter() - start) * 1000
-            msg = f"Error generating visual inspection card for {url}: {exc}"
+            msg = f"Error capturing real screenshot for {url}: {exc}"
             logger.error(msg)
-            return {
-                "success": False,
-                "screenshot_path": None,
-                "error_message": msg,
-                "capture_time_ms": round(elapsed, 2),
-            }
+            try:
+                generate_diagnostic_screenshot(abs_path, url, status_info)
+                return {
+                    "success": True,
+                    "screenshot_path": f"screenshots/{filename}",
+                    "error_message": None,
+                    "capture_time_ms": round(elapsed, 2),
+                    "browser_captured": False,
+                }
+            except Exception:
+                return {
+                    "success": False,
+                    "screenshot_path": None,
+                    "error_message": msg,
+                    "capture_time_ms": round(elapsed, 2),
+                }
 
     async def __aenter__(self):
         await self.initialize()

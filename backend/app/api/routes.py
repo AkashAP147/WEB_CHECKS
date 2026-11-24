@@ -144,6 +144,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         default_concurrency = 120 if sys.platform == "win32" else 150
         concurrency_limit = min(settings.max_concurrent_scans, default_concurrency)
         url_semaphore = asyncio.Semaphore(concurrency_limit)
+        screenshot_semaphore = asyncio.Semaphore(min(settings.max_concurrent_screenshots or 15, 15))
 
         # -----------------------------------------------------------------------
         # Producer-Consumer DB Batch Writer
@@ -288,16 +289,21 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
 
             # url_semaphore IS RELEASED! Other network workers immediately scan the next URLs!
 
-            # --- PHASE 2: INSTANT VISUAL INSPECTION CARD GENERATION ---
+            # --- PHASE 2: REAL HEADLESS BROWSER SCREENSHOT GENERATION ---
             try:
-                ss_res = await screenshot_capturer.capture(
-                    target_to_capture,
-                    scan_id,
-                    status_info=http_res,
-                )
+                async with screenshot_semaphore:
+                    ss_res = await screenshot_capturer.capture(
+                        target_to_capture,
+                        scan_id,
+                        status_info=http_res,
+                    )
                 http_res["screenshot_path"] = ss_res.get("screenshot_path")
+                if ss_res.get("title") and (not http_res.get("website_title") or http_res.get("website_title") == raw_url):
+                    http_res["website_title"] = ss_res["title"]
+                if ss_res.get("final_url") and not http_res.get("final_url"):
+                    http_res["final_url"] = ss_res["final_url"]
             except Exception as ss_err:
-                logger.debug("Visual snapshot generation error for %s: %s", raw_url, ss_err)
+                logger.debug("Screenshot capture error for %s: %s", raw_url, ss_err)
                 http_res["screenshot_path"] = None
 
             # Push to DB batch queue (non-blocking instant hand-off)
