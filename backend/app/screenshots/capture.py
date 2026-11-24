@@ -186,8 +186,9 @@ def _sync_capture_worker(
     url: str,
     abs_path: str,
     viewport: dict,
-    timeout_ms: int = 15000,
+    timeout_ms: int = 20000,
     status_info: Optional[Dict[str, Any]] = None,
+    out_details: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Worker function executed inside a thread using sync_playwright.
     
@@ -256,11 +257,11 @@ def _sync_capture_worker(
                     except Exception:
                         pass
 
-                    # Resilient fast navigation: domcontentloaded with DOM content fallback
+                    # Resilient navigation: wait for domcontentloaded up to 20s
                     navigated = False
                     target_url = url if "://" in url else f"https://{url}"
                     try:
-                        page.goto(target_url, wait_until="domcontentloaded", timeout=12000)
+                        page.goto(target_url, wait_until="domcontentloaded", timeout=20000)
                         navigated = True
                     except Exception as nav_err:
                         # If domcontentloaded was waiting on slow ad scripts/trackers, check if page rendered
@@ -274,7 +275,7 @@ def _sync_capture_worker(
                         if not navigated and target_url.startswith("https://"):
                             try:
                                 http_url = target_url.replace("https://", "http://", 1)
-                                page.goto(http_url, wait_until="domcontentloaded", timeout=10000)
+                                page.goto(http_url, wait_until="domcontentloaded", timeout=15000)
                                 navigated = True
                             except Exception:
                                 try:
@@ -286,12 +287,19 @@ def _sync_capture_worker(
 
                     if navigated:
                         try:
-                            page.wait_for_timeout(1000)
+                            page.wait_for_timeout(1500)
                         except Exception:
                             pass
                         page.screenshot(path=abs_path, full_page=False, type="png")
                         if os.path.exists(abs_path) and os.path.getsize(abs_path) > 1000:
                             browser_captured = True
+                            if out_details is not None:
+                                out_details["browser_captured"] = True
+                                try:
+                                    out_details["final_url"] = str(page.url)
+                                    out_details["title"] = str(page.title())
+                                except Exception:
+                                    pass
                 finally:
                     try:
                         browser.close()
@@ -313,7 +321,7 @@ class ScreenshotCapture:
     """
 
     DEFAULT_VIEWPORT = {"width": 1440, "height": 900}
-    DEFAULT_NAV_TIMEOUT_MS = 15_000
+    DEFAULT_NAV_TIMEOUT_MS = 20_000
 
     def __init__(self, screenshots_dir: str | None = None) -> None:
         self.screenshots_dir = screenshots_dir or settings.screenshots_dir
@@ -350,6 +358,7 @@ class ScreenshotCapture:
             filename = _build_filename(scan_id, url)
             abs_path = os.path.join(self.screenshots_dir, filename)
 
+            out_details: Dict[str, Any] = {}
             # Run in worker thread
             await asyncio.to_thread(
                 _sync_capture_worker,
@@ -358,6 +367,7 @@ class ScreenshotCapture:
                 self.DEFAULT_VIEWPORT,
                 self.DEFAULT_NAV_TIMEOUT_MS,
                 status_info,
+                out_details,
             )
 
             elapsed = (time.perf_counter() - start) * 1000
@@ -370,6 +380,9 @@ class ScreenshotCapture:
                     "screenshot_path": rel_path,
                     "error_message": None,
                     "capture_time_ms": round(elapsed, 2),
+                    "browser_captured": out_details.get("browser_captured", False),
+                    "final_url": out_details.get("final_url"),
+                    "title": out_details.get("title"),
                 }
             else:
                 # Emergency fallback

@@ -338,9 +338,8 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                 status = http_res.get("status")
                 target_to_capture = http_res.get("final_url") or raw_url
 
-                # Short-circuit offline/error/timeout sites:
-                # Instant diagnostic card generated via thread, skipping heavy DNS/SSL/Chromium overhead
-                if status != "ONLINE":
+                # Only short-circuit DNS_ERROR (domain does not exist in DNS)
+                if status == "DNS_ERROR":
                     try:
                         filename = _build_filename(scan_id, target_to_capture)
                         abs_path = os.path.join(settings.screenshots_dir, filename)
@@ -355,11 +354,14 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                     return
 
                 # For ONLINE sites: run DNS and SSL concurrently
-                dns_records, ssl_data = await asyncio.gather(run_dns(), run_ssl())
+                if status == "ONLINE":
+                    dns_records, ssl_data = await asyncio.gather(run_dns(), run_ssl())
+                else:
+                    dns_records, ssl_data = [], None
 
             # url_semaphore IS RELEASED! Other network workers immediately scan the next URLs!
 
-            # --- PHASE 2: PARALLEL SCREENSHOT DISPATCH (Independent semaphore) ---
+            # --- PHASE 2: PARALLEL SCREENSHOT & BROWSER VERIFICATION DISPATCH ---
             screenshot_path = None
             try:
                 async with screenshot_semaphore:
@@ -369,10 +371,20 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                             scan_id,
                             status_info=http_res,
                         ),
-                        timeout=22.0,
+                        timeout=28.0,
                     )
                 if ss_res.get("success"):
                     screenshot_path = ss_res.get("screenshot_path")
+                    # If Chromium successfully navigated and captured the live page, upgrade to ONLINE
+                    if ss_res.get("browser_captured"):
+                        http_res["status"] = "ONLINE"
+                        if ss_res.get("final_url"):
+                            http_res["final_url"] = ss_res["final_url"]
+                        if ss_res.get("title") and not http_res.get("website_title"):
+                            http_res["website_title"] = ss_res["title"]
+                        if not http_res.get("http_status_code"):
+                            http_res["http_status_code"] = 200
+                        http_res["error_message"] = None
             except Exception as ss_err:
                 logger.debug("Screenshot error for %s: %s", raw_url, ss_err)
 
