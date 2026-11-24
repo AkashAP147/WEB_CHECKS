@@ -312,40 +312,102 @@ export default function ScanResults() {
 
       {/* Live Scan In Progress Banner with Stop Button */}
       {isScanning && (
-        <div className="card p-4 border-indigo-200 dark:border-indigo-900 bg-gradient-to-r from-indigo-50/80 to-blue-50/80 dark:from-indigo-950/40 dark:to-blue-950/40 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-sm animate-fade-in">
-          <div className="flex items-center gap-3">
-            <div className="p-2.5 rounded-xl bg-indigo-600 text-white animate-pulse shrink-0">
-              <Activity className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="badge badge-info text-xs">AUDIT IN PROGRESS</span>
-                <span className="text-xs text-surface-600 dark:text-surface-300 font-mono">
-                  {scan?.completed_urls || 0} of {scan?.total_urls || 0} Targets Audited ({Math.round(scan?.progress_pct || 0)}%)
-                </span>
-              </div>
-              <p className="text-xs text-surface-500 dark:text-surface-400 mt-0.5">
-                Multi-worker engines are verifying HTTP response, DNS lookup, SSL validity, and visual snapshots.
-              </p>
-            </div>
-          </div>
+        <div className="card p-5 border-indigo-200 dark:border-indigo-900 bg-gradient-to-r from-indigo-50/80 to-blue-50/80 dark:from-indigo-950/40 dark:to-blue-950/40 shadow-sm animate-fade-in space-y-4">
+          {(() => {
+            const totalSc = scan?.total_screenshots || scan?.total_urls || 0;
+            const compSc = scan?.completed_screenshots ?? results.filter(r => r.screenshot_path).length;
+            const remSc = Math.max(0, totalSc - compSc);
+            const scPct = totalSc ? Math.min(100, Math.round((compSc / totalSc) * 100)) : 0;
+            const isFullWorkers = (scan?.completed_urls || 0) >= (scan?.total_urls || 0) && remSc > 0;
 
-          <div className="flex items-center gap-3 w-full md:w-auto shrink-0">
-            <div className="flex-1 md:w-48 bg-surface-200 dark:bg-surface-700 h-2.5 rounded-full overflow-hidden">
-              <div
-                className="bg-indigo-600 h-full rounded-full transition-all duration-300"
-                style={{ width: `${Math.min(100, Math.round(scan?.progress_pct || 0))}%` }}
-              />
-            </div>
-            <button
-              onClick={handleStopScan}
-              disabled={isStopping}
-              className="btn-danger text-xs py-1.5 px-3 whitespace-nowrap shadow-xs"
-            >
-              {isStopping ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Square className="w-3.5 h-3.5 fill-current" />}
-              <span>Stop Audit</span>
-            </button>
-          </div>
+            return (
+              <>
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2.5 rounded-xl bg-indigo-600 text-white animate-pulse shrink-0">
+                      <Activity className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="badge badge-info text-xs">AUDIT IN PROGRESS</span>
+                        {isFullWorkers && (
+                          <span className="badge bg-purple-100 text-purple-700 dark:bg-purple-950/60 dark:text-purple-300 text-[10px] animate-pulse">
+                            MAX WORKERS: SCREENSHOTS
+                          </span>
+                        )}
+                        <span className="text-xs text-surface-600 dark:text-surface-300 font-mono">
+                          ID: {scanId?.substring(0, 8)}
+                        </span>
+                      </div>
+                      <p className="text-xs text-surface-600 dark:text-surface-300 font-medium mt-1">
+                        {isFullWorkers
+                          ? `Network check complete! Full worker pool capturing remaining screenshots (${remSc} remaining)...`
+                          : `Evaluating HTTP, DNS, SSL, and capturing visual screenshots...`}
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={handleStopScan}
+                    disabled={isStopping}
+                    className="btn-danger text-xs py-1.5 px-3.5 whitespace-nowrap shadow-xs self-start md:self-auto"
+                  >
+                    {isStopping ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Square className="w-3.5 h-3.5 fill-current" />}
+                    <span>Stop Audit</span>
+                  </button>
+                </div>
+
+                {/* Dual Progress Bars */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+                  {/* Health Check Bar */}
+                  <div className="p-2.5 rounded-lg bg-white/70 dark:bg-surface-900/60 border border-surface-200/60 dark:border-surface-800/60 space-y-1">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="font-semibold text-surface-700 dark:text-surface-300 flex items-center gap-1">
+                        <Activity className="w-3 h-3 text-indigo-500" />
+                        Network Audit:
+                      </span>
+                      <span className="text-surface-600 dark:text-surface-400">
+                        <b>{scan?.completed_urls || 0}</b> / {scan?.total_urls || 0}
+                        <span className="ml-1.5 font-bold text-indigo-600 dark:text-indigo-400">
+                          {Math.round(scan?.progress_pct || 0)}%
+                        </span>
+                      </span>
+                    </div>
+                    <div className="w-full bg-surface-200 dark:bg-surface-700 h-2 rounded-full overflow-hidden">
+                      <div
+                        className="bg-indigo-600 h-full rounded-full transition-all duration-300"
+                        style={{ width: `${Math.min(100, Math.round(scan?.progress_pct || 0))}%` }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Screenshot Bar */}
+                  <div className="p-2.5 rounded-lg bg-purple-50/70 dark:bg-purple-950/30 border border-purple-200/60 dark:border-purple-900/50 space-y-1">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="font-semibold text-purple-900 dark:text-purple-300 flex items-center gap-1">
+                        <Camera className="w-3 h-3 text-purple-500" />
+                        Screenshots:
+                      </span>
+                      <span className="text-purple-800 dark:text-purple-300">
+                        <b>{compSc}</b> / {totalSc}
+                        <span className="mx-1 text-purple-400">•</span>
+                        <span className={remSc > 0 ? 'text-amber-600 dark:text-amber-400 font-semibold' : 'text-emerald-600 dark:text-emerald-400 font-semibold'}>
+                          {remSc > 0 ? `${remSc} Left` : 'Done'}
+                        </span>
+                        <span className="ml-1.5 font-bold text-purple-600 dark:text-purple-400">{scPct}%</span>
+                      </span>
+                    </div>
+                    <div className="w-full bg-purple-200 dark:bg-purple-900/50 h-2 rounded-full overflow-hidden">
+                      <div
+                        className="bg-purple-600 h-full rounded-full transition-all duration-300"
+                        style={{ width: `${scPct}%` }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              </>
+            );
+          })()}
         </div>
       )}
 

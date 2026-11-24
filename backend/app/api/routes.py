@@ -120,6 +120,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
     - 24-hour deduplication cache: instant reuse with zero network re-scanning.
     """
     completed = 0
+    completed_screenshots = 0
     total = len(urls)
     db_queue: asyncio.Queue = asyncio.Queue(maxsize=4000)
     screenshot_queue: asyncio.Queue = asyncio.Queue()
@@ -135,7 +136,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
 
         # 1. Update status to running immediately
         async with get_db() as db:
-            await update_scan_status(db, scan_id, "running", completed_urls=0)
+            await update_scan_status(db, scan_id, "running", completed_urls=0, completed_screenshots=0)
 
         # Domain-level fast in-memory caches (eliminates duplicate DNS/SSL checks for identical domains)
         _dns_memory_cache: Dict[str, list] = {}
@@ -152,7 +153,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         # Uses a single persistent database connection with WAL & synchronous=NORMAL
         # -----------------------------------------------------------------------
         async def db_batch_writer():
-            nonlocal completed
+            nonlocal completed, completed_screenshots
             stop_requested = False
 
             async with get_db() as db:
@@ -179,6 +180,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
 
                     try:
                         has_inserts = False
+                        has_screenshot_updates = False
                         for entry in batch:
                             action = entry[0]
                             if action == "INSERT":
@@ -197,6 +199,8 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                                 new_title = ss_data.get("title")
                                 browser_captured = ss_data.get("browser_captured", False)
                                 status_code = ss_data.get("status_code")
+                                completed_screenshots += 1
+                                has_screenshot_updates = True
 
                                 if browser_captured and sc_path:
                                     if status_code and status_code >= 400:
@@ -229,16 +233,22 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                                         (sc_path, new_title, scan_id, orig_url, final_url or orig_url),
                                     )
 
-                        # Single fast atomic commit for both results and progress
-                        if has_inserts and total:
+                        # Single fast atomic commit for both results and dual progress
+                        if (has_inserts or has_screenshot_updates) and total:
                             progress_pct = round((completed / total) * 100, 2)
+                            sc_pct = round((completed_screenshots / total) * 100, 2)
                             await db.execute(
                                 """
                                 UPDATE scans
-                                   SET status = 'running', completed_urls = ?, progress_pct = ?
+                                   SET status = 'running',
+                                       completed_urls = ?,
+                                       progress_pct = ?,
+                                       total_screenshots = ?,
+                                       completed_screenshots = ?,
+                                       screenshot_pct = ?
                                  WHERE id = ?
                                 """,
-                                (completed, progress_pct, scan_id),
+                                (completed, progress_pct, total, completed_screenshots, sc_pct, scan_id),
                             )
 
                         await db.commit()
@@ -401,6 +411,15 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         ) as shared_client:
             await asyncio.gather(*[scan_single_url(u, shared_client) for u in urls])
 
+        # Network health checks completed!
+        # Maximize workers: scale up screenshot worker pool to capture remaining screenshots at full throttle!
+        remaining_ss = screenshot_queue.qsize()
+        if remaining_ss > 0 and scan_id in _running_tasks:
+            logger.info("Network checks complete. Scaling up to 45 concurrent screenshot workers for remaining %d targets.", remaining_ss)
+            extra_workers = min(30, remaining_ss)
+            for _ in range(extra_workers):
+                ss_worker_tasks.append(asyncio.create_task(screenshot_worker()))
+
         # Wait for all background screenshots to finish (with generous 60s timeout)
         try:
             await asyncio.wait_for(screenshot_queue.join(), timeout=60.0)
@@ -437,7 +456,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
             if scan_row and scan_row.get("status") == "cancelled":
                 pass
             else:
-                await update_scan_status(db, scan_id, "completed", completed_urls=completed)
+                await update_scan_status(db, scan_id, "completed", completed_urls=completed, completed_screenshots=completed_screenshots)
 
     except asyncio.CancelledError:
         logger.info("Scan %s cancelled by user.", scan_id)
@@ -645,6 +664,13 @@ async def get_scan_status(scan_id: str):
         scan = await get_scan(db, scan_id)
     if scan is None:
         raise HTTPException(status_code=404, detail="Scan not found.")
+
+    total_sc = scan.get("total_screenshots") or scan.get("total_urls") or 0
+    comp_sc = scan.get("completed_screenshots") or 0
+    scan["total_screenshots"] = total_sc
+    scan["completed_screenshots"] = comp_sc
+    scan["remaining_screenshots"] = max(0, total_sc - comp_sc)
+    scan["screenshot_pct"] = round((comp_sc / total_sc) * 100, 2) if total_sc else 0.0
     return scan
 
 

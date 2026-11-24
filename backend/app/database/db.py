@@ -31,14 +31,17 @@ DATABASE_URL = _clean_path(
 
 _CREATE_SCANS = """
 CREATE TABLE IF NOT EXISTS scans (
-    id              TEXT PRIMARY KEY,
-    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    status          TEXT NOT NULL DEFAULT 'pending'
-                        CHECK (status IN ('pending', 'running', 'completed', 'cancelled', 'failed')),
-    total_urls      INTEGER NOT NULL DEFAULT 0,
-    completed_urls  INTEGER NOT NULL DEFAULT 0,
-    progress_pct    REAL NOT NULL DEFAULT 0.0,
-    filename        TEXT
+    id                    TEXT PRIMARY KEY,
+    created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+    status                TEXT NOT NULL DEFAULT 'pending'
+                              CHECK (status IN ('pending', 'running', 'completed', 'cancelled', 'failed')),
+    total_urls            INTEGER NOT NULL DEFAULT 0,
+    completed_urls        INTEGER NOT NULL DEFAULT 0,
+    progress_pct          REAL NOT NULL DEFAULT 0.0,
+    total_screenshots     INTEGER NOT NULL DEFAULT 0,
+    completed_screenshots INTEGER NOT NULL DEFAULT 0,
+    screenshot_pct        REAL NOT NULL DEFAULT 0.0,
+    filename              TEXT
 );
 """
 
@@ -124,11 +127,23 @@ async def init_db(db_path: str | None = None) -> None:
         await db.execute(_CREATE_SSL_DETAILS)
         await db.executescript(_CREATE_INDICES)
 
-        # Ensure 'filename' column exists in existing 'scans' tables
+        # Ensure new columns exist in existing 'scans' tables
         try:
             await db.execute("ALTER TABLE scans ADD COLUMN filename TEXT;")
         except Exception:
-            pass  # column already exists
+            pass
+        try:
+            await db.execute("ALTER TABLE scans ADD COLUMN total_screenshots INTEGER DEFAULT 0;")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE scans ADD COLUMN completed_screenshots INTEGER DEFAULT 0;")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE scans ADD COLUMN screenshot_pct REAL DEFAULT 0.0;")
+        except Exception:
+            pass
 
         await db.commit()
 

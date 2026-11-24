@@ -45,10 +45,11 @@ async def create_scan(
     now = _utcnow_iso()
     await db.execute(
         """
-        INSERT INTO scans (id, created_at, status, total_urls, completed_urls, progress_pct, filename)
-        VALUES (?, ?, 'pending', ?, 0, 0.0, ?)
+        INSERT INTO scans (id, created_at, status, total_urls, completed_urls, progress_pct,
+                           total_screenshots, completed_screenshots, screenshot_pct, filename)
+        VALUES (?, ?, 'pending', ?, 0, 0.0, ?, 0, 0.0, ?)
         """,
-        (scan_id, now, total_urls, filename),
+        (scan_id, now, total_urls, total_urls, filename),
     )
     await db.commit()
     return {
@@ -58,6 +59,9 @@ async def create_scan(
         "total_urls": total_urls,
         "completed_urls": 0,
         "progress_pct": 0.0,
+        "total_screenshots": total_urls,
+        "completed_screenshots": 0,
+        "screenshot_pct": 0.0,
         "filename": filename,
     }
 
@@ -67,22 +71,27 @@ async def update_scan_status(
     scan_id: str,
     status: str,
     completed_urls: int | None = None,
+    completed_screenshots: int | None = None,
 ) -> None:
-    """Update a scan's status and optionally its completed_urls / progress_pct."""
-    if completed_urls is not None:
-        # Recalculate progress
-        row = await db.execute_fetchall(
-            "SELECT total_urls FROM scans WHERE id = ?", (scan_id,)
-        )
-        total = row[0][0] if row else 1
-        progress_pct = round((completed_urls / total) * 100, 2) if total else 0.0
+    """Update a scan's status, completed_urls, progress_pct, and completed_screenshots."""
+    row = await db.execute_fetchall(
+        "SELECT total_urls, completed_urls, total_screenshots, completed_screenshots FROM scans WHERE id = ?", (scan_id,)
+    )
+    if row:
+        t_urls = row[0][0] or 1
+        c_urls = completed_urls if completed_urls is not None else (row[0][1] or 0)
+        t_sc = row[0][2] or t_urls
+        c_sc = completed_screenshots if completed_screenshots is not None else (row[0][3] or 0)
+        prog_pct = round((c_urls / t_urls) * 100, 2) if t_urls else 0.0
+        sc_pct = round((c_sc / t_sc) * 100, 2) if t_sc else 0.0
         await db.execute(
             """
             UPDATE scans
-               SET status = ?, completed_urls = ?, progress_pct = ?
+               SET status = ?, completed_urls = ?, progress_pct = ?,
+                   total_screenshots = ?, completed_screenshots = ?, screenshot_pct = ?
              WHERE id = ?
             """,
-            (status, completed_urls, progress_pct, scan_id),
+            (status, c_urls, prog_pct, t_sc, c_sc, sc_pct, scan_id),
         )
     else:
         await db.execute(

@@ -25,6 +25,7 @@ import {
   Globe,
   Clock,
   Sparkles,
+  Activity,
 } from 'lucide-react';
 import { useScan } from '../hooks/useScan';
 import { scanApi } from '../services/api';
@@ -406,92 +407,147 @@ export default function Scanner() {
 
       {/* Live Scan Progress Section */}
       {scan && (
-        <div className="card p-6 border-indigo-200 dark:border-indigo-900/50 shadow-md">
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
-            <div>
-              <div className="flex items-center gap-2">
-                <span className={`badge ${isScanning ? 'badge-info' : 'badge-online'}`}>
-                  {scan.status.toUpperCase()}
-                </span>
-                <span className="text-xs font-mono text-surface-400">
-                  ID: {scan.id.substring(0, 8)}
-                </span>
-              </div>
-              <h3 className="text-lg font-bold text-surface-900 dark:text-white mt-1">
-                {isScanning
-                  ? `Scanning ${scan.completed_urls} of ${scan.total_urls} websites...`
-                  : `Scan completed: ${results.length} websites evaluated.`}
-              </h3>
-            </div>
+        <div className="card p-6 border-indigo-200 dark:border-indigo-900/50 shadow-md space-y-5">
+          {(() => {
+            const totalSc = scan.total_screenshots || scan.total_urls || 0;
+            const compSc = scan.completed_screenshots ?? results.filter(r => r.screenshot_path).length;
+            const remSc = Math.max(0, totalSc - compSc);
+            const scPct = totalSc ? Math.min(100, Math.round((compSc / totalSc) * 100)) : 0;
+            const isFullWorkersScreenshotting = isScanning && scan.completed_urls >= scan.total_urls && remSc > 0;
 
-            <div className="flex items-center gap-2 shrink-0">
-              {isScanning && (
-                <button onClick={cancelScan} className="btn-danger text-xs py-2 px-3.5">
-                  <Square className="w-3.5 h-3.5" />
-                  <span>Cancel Scan</span>
-                </button>
-              )}
+            return (
+              <>
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className={`badge ${isScanning ? 'badge-info' : 'badge-online'}`}>
+                        {scan.status.toUpperCase()}
+                      </span>
+                      <span className="text-xs font-mono text-surface-400">
+                        ID: {scan.id.substring(0, 8)}
+                      </span>
+                      {isFullWorkersScreenshotting && (
+                        <span className="badge bg-purple-100 text-purple-700 dark:bg-purple-950/60 dark:text-purple-300 text-[10px] animate-pulse">
+                          MAX WORKERS ACTIVE: SCREENSHOT CAPTURES
+                        </span>
+                      )}
+                    </div>
+                    <h3 className="text-lg font-bold text-surface-900 dark:text-white mt-1">
+                      {isScanning
+                        ? scan.completed_urls < scan.total_urls
+                          ? `Auditing websites: ${scan.completed_urls} / ${scan.total_urls}...`
+                          : `Network checks complete! Full workers active on remaining screenshots (${remSc} remaining)...`
+                        : `Scan completed: ${results.length} websites evaluated (${compSc} screenshots captured).`}
+                    </h3>
+                  </div>
 
-              {!isScanning && (
-                <>
-                  <button
-                    onClick={() => handleDownloadReport('pdf')}
-                    disabled={downloadingType !== null}
-                    className="btn-secondary text-xs py-2 px-3.5"
-                  >
-                    {downloadingType === 'pdf' ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <FileText className="w-3.5 h-3.5 text-rose-500" />
+                  <div className="flex items-center gap-2 shrink-0">
+                    {isScanning && (
+                      <button onClick={cancelScan} className="btn-danger text-xs py-2 px-3.5">
+                        <Square className="w-3.5 h-3.5" />
+                        <span>Cancel Scan</span>
+                      </button>
                     )}
-                    <span>Download PDF</span>
-                  </button>
 
-                  <button
-                    onClick={() => handleDownloadReport('excel')}
-                    disabled={downloadingType !== null}
-                    className="btn-secondary text-xs py-2 px-3.5"
-                  >
-                    {downloadingType === 'excel' ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <TableIcon className="w-3.5 h-3.5 text-emerald-500" />
+                    {!isScanning && (
+                      <>
+                        <button
+                          onClick={() => handleDownloadReport('pdf')}
+                          disabled={downloadingType !== null}
+                          className="btn-secondary text-xs py-2 px-3.5"
+                        >
+                          {downloadingType === 'pdf' ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <FileText className="w-3.5 h-3.5 text-rose-500" />
+                          )}
+                          <span>Download PDF</span>
+                        </button>
+
+                        <button
+                          onClick={() => handleDownloadReport('excel')}
+                          disabled={downloadingType !== null}
+                          className="btn-secondary text-xs py-2 px-3.5"
+                        >
+                          {downloadingType === 'excel' ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <TableIcon className="w-3.5 h-3.5 text-emerald-500" />
+                          )}
+                          <span>Download Excel</span>
+                        </button>
+
+                        {results.some(r => r.status !== 'ONLINE') && (
+                          <button
+                            onClick={handleRetryFailed}
+                            className="btn-secondary text-xs py-2 px-3.5 text-amber-600 dark:text-amber-400"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                            <span>Retry Failed</span>
+                          </button>
+                        )}
+                      </>
                     )}
-                    <span>Download Excel</span>
-                  </button>
+                  </div>
+                </div>
 
-                  {results.some(r => r.status !== 'ONLINE') && (
-                    <button
-                      onClick={handleRetryFailed}
-                      className="btn-secondary text-xs py-2 px-3.5 text-amber-600 dark:text-amber-400"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5" />
-                      <span>Retry Failed</span>
-                    </button>
-                  )}
-                </>
-              )}
-            </div>
-          </div>
+                {/* Dual Progress Bars */}
+                <div className="space-y-4 pt-1">
+                  {/* 1. Network Health Check Progress */}
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-semibold text-surface-700 dark:text-surface-300 flex items-center gap-1.5">
+                        <Activity className="w-3.5 h-3.5 text-indigo-500" />
+                        Health &amp; Network Audit:
+                      </span>
+                      <span className="text-surface-500 dark:text-surface-400">
+                        <b className="text-surface-800 dark:text-surface-200">{scan.completed_urls}</b> / {scan.total_urls} Targets Checked
+                        <span className="ml-2 font-mono font-bold text-indigo-600 dark:text-indigo-400">{progressPct}%</span>
+                      </span>
+                    </div>
+                    <div className="w-full bg-surface-100 dark:bg-surface-800 rounded-full h-2.5 overflow-hidden">
+                      <div
+                        className={`h-full transition-all duration-300 ease-out ${
+                          scan.completed_urls < scan.total_urls
+                            ? 'bg-gradient-to-r from-indigo-500 to-indigo-600 animate-pulse'
+                            : 'bg-emerald-500'
+                        }`}
+                        style={{ width: `${progressPct}%` }}
+                      />
+                    </div>
+                  </div>
 
-          {/* Animated Progress Bar */}
-          <div className="w-full bg-surface-100 dark:bg-surface-800 rounded-full h-3 overflow-hidden">
-            <div
-              className={`h-full transition-all duration-500 ease-out ${
-                isScanning
-                  ? 'bg-gradient-to-r from-indigo-500 to-indigo-600 animate-pulse'
-                  : 'bg-emerald-500'
-              }`}
-              style={{ width: `${progressPct}%` }}
-            />
-          </div>
-
-          <div className="flex items-center justify-between text-xs text-surface-500 dark:text-surface-400 mt-2">
-            <span>
-              {scan.completed_urls} / {scan.total_urls} Targets Checked
-            </span>
-            <span className="font-semibold">{progressPct}%</span>
-          </div>
+                  {/* 2. Visual Screenshots Progress */}
+                  <div className="space-y-1.5 p-3.5 rounded-xl bg-purple-50/60 dark:bg-purple-950/20 border border-purple-100 dark:border-purple-900/40">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-semibold text-purple-900 dark:text-purple-300 flex items-center gap-1.5">
+                        <Camera className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />
+                        Visual Screenshot Captures:
+                      </span>
+                      <span className="text-purple-800 dark:text-purple-300">
+                        <b>{compSc}</b> / {totalSc} Taken
+                        <span className="mx-1.5 text-purple-400">•</span>
+                        <span className={remSc > 0 ? 'text-amber-600 dark:text-amber-400 font-semibold' : 'text-emerald-600 dark:text-emerald-400 font-semibold'}>
+                          {remSc > 0 ? `${remSc} Remaining` : 'All Captured'}
+                        </span>
+                        <span className="ml-2 font-mono font-bold text-purple-600 dark:text-purple-400">{scPct}%</span>
+                      </span>
+                    </div>
+                    <div className="w-full bg-purple-100 dark:bg-purple-900/40 rounded-full h-2.5 overflow-hidden">
+                      <div
+                        className={`h-full transition-all duration-300 ease-out ${
+                          isScanning && remSc > 0
+                            ? 'bg-gradient-to-r from-purple-500 to-violet-600 animate-pulse'
+                            : 'bg-purple-600'
+                        }`}
+                        style={{ width: `${scPct}%` }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              </>
+            );
+          })()}
         </div>
       )}
 

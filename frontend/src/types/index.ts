@@ -60,6 +60,10 @@ export interface Scan {
   total_urls: number;
   completed_urls: number;
   progress_pct?: number;
+  total_screenshots?: number;
+  completed_screenshots?: number;
+  remaining_screenshots?: number;
+  screenshot_pct?: number;
   filename?: string | null;
   results?: ScanResult[];
 }
