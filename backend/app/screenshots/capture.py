@@ -17,10 +17,12 @@ import sys
 import time
 import logging
 import asyncio
+import threading
+import queue
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from backend.app.config import settings
 
@@ -273,133 +275,184 @@ def generate_diagnostic_screenshot(
         return False
 
 
-def _sync_capture_worker(
-    url: str,
-    abs_path: str,
-    viewport: dict,
-    timeout_ms: int = 8000,
-    status_info: Optional[Dict[str, Any]] = None,
-    out_details: Optional[Dict[str, Any]] = None,
-) -> None:
-    """Worker function executed inside a thread using sync_playwright.
+class BrowserWorkerPool:
+    """Persistent Chromium browser pool for blazing-fast, sub-second parallel screenshots.
     
-    Tries headless Chromium capture first; if navigation fails or times out,
-    automatically generates a crisp diagnostic screenshot.
+    Instead of spawning and killing Chromium processes for every URL (which causes 
+    heavy 2-second overhead and Windows process table exhaustion), this pool maintains
+    a fixed set of persistent headless Chromium instances. Capturing a screenshot
+    simply creates an isolated browser context (~20ms), navigates, captures, and closes
+    the context (~10ms).
     """
-    if sys.platform == "win32":
-        try:
-            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-        except Exception:
-            pass
 
-    browser_captured = False
+    def __init__(self, pool_size: int = 6):
+        self.pool_size = pool_size
+        self.queue: "queue.Queue[Optional[tuple]]" = queue.Queue()
+        self.threads: List[threading.Thread] = []
+        self.lock = threading.Lock()
+        self.is_started = False
+        self.is_shutdown = False
 
-    if PLAYWRIGHT_AVAILABLE:
+    def start(self):
+        with self.lock:
+            if self.is_started or not PLAYWRIGHT_AVAILABLE:
+                return
+            self.is_shutdown = False
+            for i in range(self.pool_size):
+                t = threading.Thread(
+                    target=self._worker_loop,
+                    name=f"PlaywrightWorker-{i+1}",
+                    daemon=True,
+                )
+                t.start()
+                self.threads.append(t)
+            self.is_started = True
+            logger.info("BrowserWorkerPool initialized with %d persistent Chromium instances.", self.pool_size)
+
+    def shutdown(self):
+        with self.lock:
+            if not self.is_started or self.is_shutdown:
+                return
+            self.is_shutdown = True
+            for _ in range(len(self.threads)):
+                self.queue.put(None)
+            self.threads.clear()
+            self.is_started = False
+
+    def _worker_loop(self):
+        if sys.platform == "win32":
+            try:
+                asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+            except Exception:
+                pass
+
         try:
             with sync_playwright() as p:
-                browser = p.chromium.launch(
-                    headless=True,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--disable-gpu",
-                        "--disable-dev-shm-usage",
-                        "--no-sandbox",
-                        "--disable-setuid-sandbox",
-                        "--disable-extensions",
-                        "--disable-background-networking",
-                        "--disable-background-timer-throttling",
-                        "--disable-backgrounding-occluded-windows",
-                        "--disable-breakpad",
-                        "--disable-component-extensions-with-background-pages",
-                        "--disable-features=TranslateUI,BlinkGenPropertyTrees",
-                        "--disable-ipc-flooding-protection",
-                        "--disable-renderer-backgrounding",
-                        "--mute-audio",
-                        "--no-first-run",
-                        "--no-default-browser-check",
-                    ],
-                )
-                try:
-                    context = browser.new_context(
-                        viewport=viewport,
-                        ignore_https_errors=True,
-                        user_agent=(
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) "
-                            "Chrome/124.0.0.0 Safari/537.36"
-                        ),
-                        locale="en-US",
-                    )
-                    page = context.new_page()
-                    page.set_default_navigation_timeout(timeout_ms)
+                browser = None
 
-                    # Remove navigator.webdriver anti-bot flag
-                    try:
-                        page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-                    except Exception:
-                        pass
-
-                    # Abort heavy video/audio streaming to prevent network and CPU choking
-                    try:
-                        page.route(
-                            re.compile(r"\.(mp4|webm|ogg|avi|mov|wmv|flv|mkv)(\?.*)?$", re.IGNORECASE),
-                            lambda route: route.abort(),
+                def _get_browser():
+                    nonlocal browser
+                    if browser is None or not browser.is_connected():
+                        browser = p.chromium.launch(
+                            headless=True,
+                            args=[
+                                "--disable-blink-features=AutomationControlled",
+                                "--disable-gpu",
+                                "--disable-dev-shm-usage",
+                                "--no-sandbox",
+                                "--disable-setuid-sandbox",
+                                "--disable-extensions",
+                                "--disable-background-networking",
+                                "--disable-background-timer-throttling",
+                                "--disable-backgrounding-occluded-windows",
+                                "--disable-breakpad",
+                                "--disable-component-extensions-with-background-pages",
+                                "--disable-features=TranslateUI,BlinkGenPropertyTrees",
+                                "--disable-ipc-flooding-protection",
+                                "--disable-renderer-backgrounding",
+                                "--mute-audio",
+                                "--no-first-run",
+                                "--no-default-browser-check",
+                            ],
                         )
-                    except Exception:
-                        pass
+                    return browser
 
-                    # Use final_url if verified by HTTP scanner
-                    target_url = (status_info.get("final_url") if status_info else None) or url
-                    if "://" in target_url:
-                        primary_url = target_url
-                        alt_url = target_url.replace("https://", "http://", 1) if target_url.startswith("https://") else target_url.replace("http://", "https://", 1)
-                    else:
-                        primary_url = f"https://{target_url}"
-                        alt_url = f"http://{target_url}"
-
-                    navigated = False
-                    nav_resp = None
-                    try:
-                        nav_resp = page.goto(primary_url, wait_until="domcontentloaded", timeout=8000)
-                        navigated = True
-                    except Exception:
-                        try:
-                            content = page.content()
-                            if content and len(content) > 300:
-                                navigated = True
-                        except Exception:
-                            pass
-
-                    if not navigated:
-                        try:
-                            nav_resp = page.goto(alt_url, wait_until="domcontentloaded", timeout=7000)
-                            navigated = True
-                        except Exception:
+                while True:
+                    item = self.queue.get()
+                    if item is None:
+                        if browser:
                             try:
-                                content = page.content()
-                                if content and len(content) > 300:
-                                    navigated = True
+                                browser.close()
+                            except Exception:
+                                pass
+                        self.queue.task_done()
+                        break
+
+                    job_args, loop, fut = item
+                    url, abs_path, viewport, timeout_ms, status_info = job_args
+                    out_details: Dict[str, Any] = {}
+                    browser_captured = False
+
+                    try:
+                        b = _get_browser()
+                        context = b.new_context(
+                            viewport=viewport,
+                            ignore_https_errors=True,
+                            user_agent=(
+                                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                "Chrome/124.0.0.0 Safari/537.36"
+                            ),
+                            locale="en-US",
+                        )
+                        try:
+                            page = context.new_page()
+                            page.set_default_navigation_timeout(timeout_ms)
+
+                            # Remove navigator.webdriver anti-bot flag
+                            try:
+                                page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
                             except Exception:
                                 pass
 
-                    if navigated:
-                        try:
-                            # Wait for client-side rendering / hydration
-                            page.wait_for_timeout(800)
-                        except Exception:
-                            pass
-                        page.screenshot(path=abs_path, full_page=False, type="png")
-                        if os.path.exists(abs_path) and os.path.getsize(abs_path) > 1000:
-                            browser_captured = True
-                            if out_details is not None:
-                                out_details["browser_captured"] = True
+                            # Block heavy video/audio streaming
+                            try:
+                                page.route(
+                                    re.compile(r"\.(mp4|webm|ogg|avi|mov|wmv|flv|mkv)(\?.*)?$", re.IGNORECASE),
+                                    lambda route: route.abort(),
+                                )
+                            except Exception:
+                                pass
+
+                            target_url = (status_info.get("final_url") if status_info else None) or url
+                            if "://" in target_url:
+                                primary_url = target_url
+                                alt_url = target_url.replace("https://", "http://", 1) if target_url.startswith("https://") else target_url.replace("http://", "https://", 1)
+                            else:
+                                primary_url = f"https://{target_url}"
+                                alt_url = f"http://{target_url}"
+
+                            navigated = False
+                            nav_resp = None
+                            try:
+                                nav_resp = page.goto(primary_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                                navigated = True
+                            except Exception:
                                 try:
+                                    content = page.content()
+                                    if content and len(content) > 300:
+                                        navigated = True
+                                except Exception:
+                                    pass
+
+                            if not navigated:
+                                try:
+                                    nav_resp = page.goto(alt_url, wait_until="domcontentloaded", timeout=max(3000, timeout_ms - 2000))
+                                    navigated = True
+                                except Exception:
+                                    try:
+                                        content = page.content()
+                                        if content and len(content) > 300:
+                                            navigated = True
+                                    except Exception:
+                                        pass
+
+                            if navigated:
+                                # Fast 120ms paint breather for layout & web fonts
+                                try:
+                                    page.wait_for_timeout(120)
+                                except Exception:
+                                    pass
+
+                                page.screenshot(path=abs_path, full_page=False, type="png")
+                                if os.path.exists(abs_path) and os.path.getsize(abs_path) > 1000:
+                                    browser_captured = True
+                                    out_details["browser_captured"] = True
                                     out_details["final_url"] = str(page.url)
-                                    title = None
                                     try:
                                         title = str(page.title()).strip()
                                     except Exception:
-                                        pass
+                                        title = None
                                     if not title:
                                         try:
                                             title = str(page.evaluate("() => document.title || document.querySelector('h1')?.innerText || ''")).strip()
@@ -411,41 +464,102 @@ def _sync_capture_worker(
                                         out_details["status_code"] = nav_resp.status
                                     else:
                                         out_details["status_code"] = 200
-                                except Exception:
-                                    pass
-                finally:
-                    try:
-                        browser.close()
-                    except Exception:
-                        pass
-        except Exception as exc:
-            logger.warning("Playwright browser navigation failed for %s (%s). Using diagnostic screenshot.", url, exc)
+                        finally:
+                            try:
+                                context.close()
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        logger.warning("Browser worker error on %s: %s", url, e)
+                        try:
+                            if browser:
+                                browser.close()
+                        except Exception:
+                            pass
+                        browser = None
 
-    # Fallback to diagnostic mockup image if browser capture didn't produce a valid file
-    if not browser_captured or not os.path.exists(abs_path) or os.path.getsize(abs_path) == 0:
-        generate_diagnostic_screenshot(abs_path, url, status_info)
+                    if not browser_captured or not os.path.exists(abs_path) or os.path.getsize(abs_path) == 0:
+                        generate_diagnostic_screenshot(abs_path, url, status_info)
+
+                    result_payload = {
+                        "browser_captured": browser_captured,
+                        "out_details": out_details,
+                    }
+                    if not fut.cancelled():
+                        loop.call_soon_threadsafe(fut.set_result, result_payload)
+                    self.queue.task_done()
+        except Exception as pool_err:
+            logger.error("Fatal exception in browser worker loop: %s", pool_err)
+
+    async def capture(
+        self,
+        url: str,
+        abs_path: str,
+        viewport: dict,
+        timeout_ms: int,
+        status_info: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if not self.is_started:
+            self.start()
+
+        if not PLAYWRIGHT_AVAILABLE or self.is_shutdown:
+            generate_diagnostic_screenshot(abs_path, url, status_info)
+            return {"browser_captured": False, "out_details": {}}
+
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        job_args = (url, abs_path, viewport, timeout_ms, status_info)
+        self.queue.put((job_args, loop, fut))
+
+        try:
+            return await fut
+        except Exception as e:
+            logger.error("Error awaiting screenshot capture for %s: %s", url, e)
+            generate_diagnostic_screenshot(abs_path, url, status_info)
+            return {"browser_captured": False, "out_details": {}}
+
+
+_browser_pool: Optional[BrowserWorkerPool] = None
+_pool_lock = threading.Lock()
+
+
+def get_browser_pool() -> BrowserWorkerPool:
+    """Retrieve or lazily initialize the shared persistent browser worker pool."""
+    global _browser_pool
+    if _browser_pool is None:
+        with _pool_lock:
+            if _browser_pool is None:
+                pool_sz = max(4, min(settings.max_concurrent_screenshots or 6, 8))
+                _browser_pool = BrowserWorkerPool(pool_size=pool_sz)
+                _browser_pool.start()
+    return _browser_pool
 
 
 class ScreenshotCapture:
-    """Headless Chromium screenshot service backed by Playwright with diagnostic fallbacks.
+    """Headless Chromium screenshot service backed by persistent Playwright pool with diagnostic fallbacks.
 
-    Executes via sync_playwright within worker threads (asyncio.to_thread)
-    and guarantees a valid screenshot file for EVERY target (online, offline, error).
+    Reuses persistent headless Chromium instances across scans for sub-second,
+    truly parallel captures without process creation overhead or Windows handle exhaustion.
+    Guarantees a valid screenshot file for EVERY target (online, offline, error).
     """
 
     DEFAULT_VIEWPORT = {"width": 1440, "height": 900}
-    DEFAULT_NAV_TIMEOUT_MS = 10_000
+    DEFAULT_NAV_TIMEOUT_MS = 6000
 
     def __init__(self, screenshots_dir: str | None = None) -> None:
         self.screenshots_dir = screenshots_dir or settings.screenshots_dir
 
     async def initialize(self) -> None:
-        """No-op kept for lifecycle compatibility."""
-        pass
+        """Pre-warm persistent browser workers."""
+        if PLAYWRIGHT_AVAILABLE:
+            get_browser_pool().start()
 
     async def cleanup(self) -> None:
-        """No-op kept for lifecycle compatibility."""
-        pass
+        """Shutdown persistent browser workers."""
+        global _browser_pool
+        if _browser_pool is not None:
+            _browser_pool.shutdown()
+            _browser_pool = None
 
     async def capture(
         self,
@@ -464,7 +578,6 @@ class ScreenshotCapture:
     ) -> dict:
         """Capture real headless Chromium screenshot for online websites, with diagnostic fallback for dead hosts."""
         start = time.perf_counter()
-        out_details: Dict[str, Any] = {}
         try:
             # Ensure target directory exists
             Path(self.screenshots_dir).mkdir(parents=True, exist_ok=True)
@@ -474,8 +587,8 @@ class ScreenshotCapture:
 
             status = (status_info.get("status") or "").upper() if status_info else ""
 
-            # Only skip Chromium if domain completely failed DNS resolution (NXDOMAIN)
-            if status == "DNS_ERROR":
+            # Instant diagnostic card for NXDOMAIN and completely dead/refused hosts
+            if status in ("DNS_ERROR", "OFFLINE"):
                 generate_diagnostic_screenshot(abs_path, url, status_info)
                 elapsed = (time.perf_counter() - start) * 1000
                 return {
@@ -489,16 +602,18 @@ class ScreenshotCapture:
                     "status_code": status_info.get("http_status_code") if status_info else None,
                 }
 
-            # For ONLINE / reachable websites: launch real headless Chromium in worker thread
-            await asyncio.to_thread(
-                _sync_capture_worker,
-                url,
-                abs_path,
-                self.DEFAULT_VIEWPORT,
-                self.DEFAULT_NAV_TIMEOUT_MS,
-                status_info,
-                out_details,
+            # For reachable / active targets: capture through persistent browser pool
+            pool = get_browser_pool()
+            res = await pool.capture(
+                url=url,
+                abs_path=abs_path,
+                viewport=self.DEFAULT_VIEWPORT,
+                timeout_ms=self.DEFAULT_NAV_TIMEOUT_MS,
+                status_info=status_info,
             )
+
+            out_details = res.get("out_details", {})
+            browser_captured = res.get("browser_captured", False)
 
             elapsed = (time.perf_counter() - start) * 1000
             rel_path = f"screenshots/{filename}"
@@ -507,7 +622,7 @@ class ScreenshotCapture:
                 "screenshot_path": rel_path,
                 "error_message": None,
                 "capture_time_ms": round(elapsed, 2),
-                "browser_captured": out_details.get("browser_captured", False),
+                "browser_captured": browser_captured,
                 "final_url": out_details.get("final_url") or (status_info.get("final_url") if status_info else url),
                 "title": out_details.get("title") or (status_info.get("website_title") if status_info else None),
                 "status_code": out_details.get("status_code") or (status_info.get("http_status_code") if status_info else 200),

@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from backend.app.config import settings
 from backend.app.database.db import init_db
 from backend.app.api.routes import router
+from backend.app.screenshots.capture import get_browser_pool
 
 # Ensure storage directories exist at import time
 os.makedirs(settings.screenshots_dir, exist_ok=True)
@@ -49,9 +50,18 @@ async def lifespan(app: FastAPI):
     # Initialize the database (create tables)
     await init_db()
 
+    # Pre-warm high-speed persistent browser workers in background
+    try:
+        get_browser_pool().start()
+    except Exception as pool_init_err:
+        logging.getLogger(__name__).warning("Browser pool pre-warm note: %s", pool_init_err)
+
     yield
     # --- Shutdown ---
-    # Nothing special to tear down
+    try:
+        get_browser_pool().shutdown()
+    except Exception:
+        pass
 
 
 app = FastAPI(

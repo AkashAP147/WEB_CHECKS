@@ -2,6 +2,8 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { scanApi } from '../services/api';
 import type { Scan, ScanResult } from '../types';
 
+export const ACTIVE_SCAN_STORAGE_KEY = 'webpulse_active_scan_id';
+
 export function useScan() {
   const [scan, setScan] = useState<Scan | null>(null);
   const [results, setResults] = useState<ScanResult[]>([]);
@@ -18,6 +20,20 @@ export function useScan() {
       pollingRef.current = null;
     }
   }, []);
+
+  const clearScan = useCallback(() => {
+    stopPolling();
+    try {
+      localStorage.removeItem(ACTIVE_SCAN_STORAGE_KEY);
+    } catch {
+      // ignore storage errors
+    }
+    setScan(null);
+    setResults([]);
+    setError(null);
+    lastCompletedRef.current = -1;
+    lastStatusRef.current = '';
+  }, [stopPolling]);
 
   const startPolling = useCallback(
     (scanId: string) => {
@@ -62,6 +78,11 @@ export function useScan() {
       setResults([]);
       try {
         const response = await scanApi.startScan(urls);
+        try {
+          localStorage.setItem(ACTIVE_SCAN_STORAGE_KEY, response.scan_id);
+        } catch {
+          // ignore storage errors
+        }
         const scanData = await scanApi.getScan(response.scan_id);
         setScan(scanData);
         startPolling(response.scan_id);
@@ -84,6 +105,11 @@ export function useScan() {
       setResults([]);
       try {
         const response = await scanApi.uploadExcelScan(file);
+        try {
+          localStorage.setItem(ACTIVE_SCAN_STORAGE_KEY, response.scan_id);
+        } catch {
+          // ignore storage errors
+        }
         const scanData = await scanApi.getScan(response.scan_id);
         setScan(scanData);
         startPolling(response.scan_id);
@@ -115,6 +141,11 @@ export function useScan() {
       setLoading(true);
       setError(null);
       try {
+        localStorage.setItem(ACTIVE_SCAN_STORAGE_KEY, scanId);
+      } catch {
+        // ignore storage errors
+      }
+      try {
         const scanData = await scanApi.getScan(scanId);
         setScan(scanData);
         const resultsData = await scanApi.getScanResults(scanId);
@@ -132,6 +163,18 @@ export function useScan() {
     [startPolling]
   );
 
+  // Restore active scan from localStorage on mount so switching tabs never loses progress
+  useEffect(() => {
+    try {
+      const activeScanId = localStorage.getItem(ACTIVE_SCAN_STORAGE_KEY);
+      if (activeScanId && !scan) {
+        loadScan(activeScanId);
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
   useEffect(() => {
     return () => stopPolling();
   }, [stopPolling]);
@@ -145,6 +188,7 @@ export function useScan() {
     uploadExcelScan,
     cancelScan,
     loadScan,
+    clearScan,
     setError,
   };
 }

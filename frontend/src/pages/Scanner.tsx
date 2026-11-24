@@ -63,6 +63,7 @@ export default function Scanner() {
     startScan,
     uploadExcelScan,
     cancelScan,
+    clearScan,
     setError,
   } = useScan();
 
@@ -451,6 +452,15 @@ export default function Scanner() {
 
                     {!isScanning && (
                       <>
+                        <button
+                          onClick={clearScan}
+                          className="btn-secondary text-xs py-2 px-3.5 flex items-center gap-1.5"
+                          title="Start a fresh audit session"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5 text-indigo-500" />
+                          <span>New Scan</span>
+                        </button>
+
                         <button
                           onClick={() => handleDownloadReport('pdf')}
                           disabled={downloadingType !== null}
