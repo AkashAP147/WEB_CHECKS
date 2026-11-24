@@ -50,6 +50,13 @@ export default function ScanResults() {
   // Status & Search filtering
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'ONLINE' | 'OFFLINE' | 'ERRORS'>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const [pageSize, setPageSize] = useState<number>(50);
+
+  // Reset page when filtering or searching
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [statusFilter, searchQuery]);
 
   // Lazy loaded details per scan result
   const [dnsDataMap, setDnsDataMap] = useState<Record<number, DNSRecord[]>>({});
@@ -168,6 +175,11 @@ export default function ScanResults() {
     }
     return true;
   });
+
+  const totalPages = Math.max(1, Math.ceil(filteredResults.length / pageSize));
+  const validPage = Math.min(currentPage, totalPages);
+  const startIndex = (validPage - 1) * pageSize;
+  const paginatedResults = filteredResults.slice(startIndex, startIndex + pageSize);
 
   return (
     <div className="space-y-8 animate-fade-in pb-16">
@@ -514,7 +526,7 @@ export default function ScanResults() {
               Audited Targets &amp; Deep Inspection
             </h3>
             <span className="text-xs text-surface-400">
-              Showing {filteredResults.length} of {total} targets • Click any row to view DNS records, SSL cert, and full screenshot
+              Showing {filteredResults.length > 0 ? `${startIndex + 1}–${Math.min(startIndex + pageSize, filteredResults.length)} of ${filteredResults.length}` : '0'} targets (Page {validPage} of {totalPages}) • Click any row to view DNS, SSL &amp; screenshot
             </span>
           </div>
           {(statusFilter !== 'ALL' || searchQuery) && (
@@ -538,7 +550,7 @@ export default function ScanResults() {
               No results found matching current filter ({statusFilter}{searchQuery ? `, query: "${searchQuery}"` : ''}).
             </div>
           ) : (
-            filteredResults.map(item => {
+            paginatedResults.map(item => {
               const isExpanded = expandedId === item.id;
               const currentDns = dnsDataMap[item.id] || [];
               const currentSsl = sslDataMap[item.id];
@@ -829,6 +841,62 @@ export default function ScanResults() {
             })
           )}
         </div>
+
+        {/* Pagination Controls */}
+        {filteredResults.length > pageSize && (
+          <div className="p-4 border-t border-surface-200 dark:border-surface-800 bg-surface-50/50 dark:bg-surface-900/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-xs text-surface-500">
+              <span>Rows per page:</span>
+              <select
+                value={pageSize}
+                onChange={e => { setPageSize(Number(e.target.value)); setCurrentPage(1); }}
+                className="bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded px-2 py-1 text-xs text-surface-900 dark:text-white"
+              >
+                <option value={25}>25</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+                <option value={200}>200</option>
+              </select>
+              <span>
+                Showing {startIndex + 1}–{Math.min(startIndex + pageSize, filteredResults.length)} of {filteredResults.length}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-1.5 self-end sm:self-auto">
+              <button
+                onClick={() => setCurrentPage(1)}
+                disabled={validPage <= 1}
+                className="px-2.5 py-1 text-xs rounded border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 disabled:opacity-40 hover:bg-surface-50 dark:hover:bg-surface-700 text-surface-700 dark:text-surface-300"
+              >
+                « First
+              </button>
+              <button
+                onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                disabled={validPage <= 1}
+                className="px-2.5 py-1 text-xs rounded border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 disabled:opacity-40 hover:bg-surface-50 dark:hover:bg-surface-700 text-surface-700 dark:text-surface-300"
+              >
+                ‹ Prev
+              </button>
+              <span className="text-xs px-2 text-surface-600 dark:text-surface-400 font-medium">
+                Page {validPage} of {totalPages}
+              </span>
+              <button
+                onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+                disabled={validPage >= totalPages}
+                className="px-2.5 py-1 text-xs rounded border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 disabled:opacity-40 hover:bg-surface-50 dark:hover:bg-surface-700 text-surface-700 dark:text-surface-300"
+              >
+                Next ›
+              </button>
+              <button
+                onClick={() => setCurrentPage(totalPages)}
+                disabled={validPage >= totalPages}
+                className="px-2.5 py-1 text-xs rounded border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 disabled:opacity-40 hover:bg-surface-50 dark:hover:bg-surface-700 text-surface-700 dark:text-surface-300"
+              >
+                Last »
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

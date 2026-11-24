@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import io
 import os
+import re
 import sys
 import time
 import uuid
@@ -861,21 +862,30 @@ async def download_pdf_report(
     filename = f"{name_stem}{status_suffix}{mode_suffix}{batch_suffix}.pdf"
     filepath = os.path.join(settings.reports_dir, filename)
 
-    # Always generate or regenerate when requested, filtered, or if missing
-    generator = PDFReportGenerator()
-    await generator.generate(
-        scan=scan,
-        results=batch_results,
-        output_path=filepath,
-        status_filter=status,
-        report_mode=mode,
-    )
+    try:
+        # Always generate or regenerate when requested, filtered, or if missing
+        generator = PDFReportGenerator()
+        await generator.generate(
+            scan=scan,
+            results=batch_results,
+            output_path=filepath,
+            status_filter=status,
+            report_mode=mode,
+        )
 
-    return FileResponse(
-        filepath,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
+        return FileResponse(
+            filepath,
+            media_type="application/pdf",
+            filename=filename,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        import traceback
+        tb = traceback.format_exc()
+        logger.error("Error in download_pdf_report for %s: %s\n%s", scan_id, exc, tb)
+        return JSONResponse(status_code=500, content={"detail": f"PDF generation failed: {exc}", "traceback": tb})
 
 
 # ---------------------------------------------------------------------------
@@ -886,26 +896,34 @@ async def download_excel_report(scan_id: str):
     if ExcelReportGenerator is None:
         raise HTTPException(status_code=501, detail="Excel report generation is not available.")
 
-    async with get_db() as db:
-        scan = await get_scan(db, scan_id)
-        if scan is None:
-            raise HTTPException(status_code=404, detail="Scan not found.")
-        results = await get_scan_results(db, scan_id)
+    try:
+        async with get_db() as db:
+            scan = await get_scan(db, scan_id)
+            if scan is None:
+                raise HTTPException(status_code=404, detail="Scan not found.")
+            results = await get_scan_results(db, scan_id)
 
-    raw_filename = scan.get("filename")
-    clean_prefix = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', os.path.splitext(raw_filename)[0]) if raw_filename else ""
-    filename = f"{clean_prefix}_{scan_id[:8]}.xlsx" if clean_prefix else f"report_{scan_id}.xlsx"
-    filepath = os.path.join(settings.reports_dir, filename)
+        raw_filename = scan.get("filename")
+        clean_prefix = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', os.path.splitext(raw_filename)[0]) if raw_filename else ""
+        filename = f"{clean_prefix}_{scan_id[:8]}.xlsx" if clean_prefix else f"report_{scan_id}.xlsx"
+        filepath = os.path.join(settings.reports_dir, filename)
 
-    if not os.path.isfile(filepath):
         generator = ExcelReportGenerator()
         await generator.generate(scan=scan, results=results, output_path=filepath)
 
-    return FileResponse(
-        filepath,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
+        return FileResponse(
+            filepath,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename=filename,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        import traceback
+        tb = traceback.format_exc()
+        logger.error("Error in download_excel_report for %s: %s\n%s", scan_id, exc, tb)
+        return JSONResponse(status_code=500, content={"detail": f"Excel generation failed: {exc}", "traceback": tb})
 
 
 # ---------------------------------------------------------------------------

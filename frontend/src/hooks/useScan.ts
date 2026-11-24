@@ -9,6 +9,9 @@ export function useScan() {
   const [error, setError] = useState<string | null>(null);
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const lastCompletedRef = useRef<number>(-1);
+  const lastStatusRef = useRef<string>('');
+
   const stopPolling = useCallback(() => {
     if (pollingRef.current) {
       clearInterval(pollingRef.current);
@@ -19,12 +22,23 @@ export function useScan() {
   const startPolling = useCallback(
     (scanId: string) => {
       stopPolling();
+      lastCompletedRef.current = -1;
+      lastStatusRef.current = '';
       pollingRef.current = setInterval(async () => {
         try {
           const scanData = await scanApi.getScan(scanId);
           setScan(scanData);
-          const resultsData = await scanApi.getScanResults(scanId);
-          setResults(Array.isArray(resultsData) ? resultsData : ((resultsData as any)?.results || []));
+
+          const hasProgress = scanData.completed_urls !== lastCompletedRef.current;
+          const statusChanged = scanData.status !== lastStatusRef.current;
+          lastCompletedRef.current = scanData.completed_urls;
+          lastStatusRef.current = scanData.status;
+
+          // Only fetch full results array when there is new progress or terminal status
+          if (hasProgress || statusChanged) {
+            const resultsData = await scanApi.getScanResults(scanId);
+            setResults(Array.isArray(resultsData) ? resultsData : ((resultsData as any)?.results || []));
+          }
 
           if (
             scanData.status === 'completed' ||

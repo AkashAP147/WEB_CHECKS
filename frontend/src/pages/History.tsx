@@ -86,24 +86,40 @@ export default function History() {
 
   useEffect(() => {
     fetchHistory();
-  }, [fetchHistory]);
 
-  const handleDownloadReport = async (scanId: string, type: 'pdf' | 'excel', filename?: string | null) => {
-    setDownloadingId(`${scanId}_${type}`);
+    // Auto-poll scan history every 2.5 seconds so active scans update progress in real-time
+    const interval = setInterval(async () => {
+      try {
+        const offset = (page - 1) * limit;
+        const data = await scanApi.getHistory({
+          limit,
+          offset,
+          search: searchTerm.trim() || undefined,
+          status: statusFilter !== 'ALL' ? statusFilter : undefined,
+        });
+        setHistoryItems(data.items || []);
+        setTotal(data.total || 0);
+      } catch {
+        // quiet poll failure
+      }
+    }, 2500);
+
+    return () => clearInterval(interval);
+  }, [fetchHistory, page, searchTerm, statusFilter]);
+
+  const handleDownloadReport = (scanId: string, type: 'pdf' | 'excel', filename?: string | null) => {
     try {
       const cleanName = filename ? filename.replace(/\.[^/.]+$/, "").replace(/[^a-zA-Z0-9_-]/g, "_") : "";
       const baseName = cleanName ? `${cleanName}_${scanId.substring(0, 8)}` : `WebPulse_Audit_${scanId.substring(0, 8)}`;
-      if (type === 'pdf') {
-        const blob = await scanApi.downloadPDF(scanId);
-        downloadBlob(blob, `${baseName}.pdf`);
-      } else {
-        const blob = await scanApi.downloadExcel(scanId);
-        downloadBlob(blob, `${baseName}.xlsx`);
-      }
+      const url = `/api/reports/${scanId}/${type}`;
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `${baseName}.${type === 'excel' ? 'xlsx' : 'pdf'}`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
     } catch (err: any) {
       alert(`Download failed: ` + (err.message || 'Error'));
-    } finally {
-      setDownloadingId(null);
     }
   };
 
