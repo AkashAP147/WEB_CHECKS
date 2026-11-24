@@ -389,9 +389,17 @@ class BrowserWorkerPool:
                             page = context.new_page()
                             page.set_default_navigation_timeout(timeout_ms)
 
-                            # Remove navigator.webdriver anti-bot flag
+                            # Remove navigator.webdriver anti-bot flag and prevent font stall
                             try:
-                                page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+                                page.add_init_script("""
+                                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                                    try {
+                                        if (window.document && document.fonts) {
+                                            Object.defineProperty(document.fonts, 'ready', {get: () => Promise.resolve()});
+                                            document.fonts.status = 'loaded';
+                                        }
+                                    } catch(e) {}
+                                """)
                             except Exception:
                                 pass
 
@@ -445,7 +453,13 @@ class BrowserWorkerPool:
                                 except Exception:
                                     pass
 
-                                page.screenshot(path=abs_path, full_page=False, type="png")
+                                try:
+                                    page.screenshot(path=abs_path, full_page=False, type="png", timeout=2500, animations="disabled")
+                                except Exception:
+                                    try:
+                                        page.screenshot(path=abs_path, full_page=False, type="png", timeout=1500, animations="disabled")
+                                    except Exception:
+                                        pass
                                 if os.path.exists(abs_path) and os.path.getsize(abs_path) > 1000:
                                     browser_captured = True
                                     out_details["browser_captured"] = True
@@ -530,7 +544,7 @@ def get_browser_pool() -> BrowserWorkerPool:
     if _browser_pool is None:
         with _pool_lock:
             if _browser_pool is None:
-                pool_sz = max(4, min(settings.max_concurrent_screenshots or 6, 8))
+                pool_sz = max(6, min(settings.max_concurrent_screenshots or 8, 12))
                 _browser_pool = BrowserWorkerPool(pool_size=pool_sz)
                 _browser_pool.start()
     return _browser_pool

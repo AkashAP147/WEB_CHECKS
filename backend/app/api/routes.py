@@ -420,11 +420,15 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
             for _ in range(extra_workers):
                 ss_worker_tasks.append(asyncio.create_task(screenshot_worker()))
 
-        # Wait for all background screenshots to finish (with generous 180s timeout)
-        try:
-            await asyncio.wait_for(screenshot_queue.join(), timeout=180.0)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            logger.info("Screenshot queue drained or reached timeout.")
+        # Wait for all background screenshots to finish (processes EVERY target without premature cutoff)
+        while not screenshot_queue.empty() and scan_id in _running_tasks:
+            try:
+                await asyncio.wait_for(screenshot_queue.join(), timeout=4.0)
+                break
+            except asyncio.TimeoutError:
+                if scan_id not in _running_tasks:
+                    break
+                continue
 
         # Stop screenshot workers
         for _ in ss_worker_tasks:
