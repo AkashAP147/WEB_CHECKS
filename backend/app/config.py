@@ -13,9 +13,9 @@ class Settings(BaseSettings):
     screenshots_dir: str = str(PROJECT_ROOT / "storage" / "screenshots")
     reports_dir: str = str(PROJECT_ROOT / "storage" / "reports")
     max_concurrent_scans: int = 300
-    max_concurrent_screenshots: int = 15
+    max_concurrent_screenshots: int = 16
     scan_timeout: int = 15
-    browser_timeout: int = 15000
+    browser_timeout: int = 10000
     max_urls_per_scan: int = 10000
     project_root: Path = PROJECT_ROOT
 

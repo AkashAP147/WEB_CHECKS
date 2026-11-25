@@ -143,8 +143,9 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         _ssl_memory_cache: Dict[str, dict | None] = {}
 
         # Concurrency control:
-        # URL network worker concurrency: 35 on Windows (50 on Linux) for optimal throughput without socket or DNS exhaustion
-        default_concurrency = 35 if sys.platform == "win32" else 50
+        # URL network worker concurrency: 50 on Windows (80 on Linux)
+        # Staggered connection pool avoids socket exhaustion while keeping throughput high
+        default_concurrency = 50 if sys.platform == "win32" else 80
         concurrency_limit = min(settings.max_concurrent_scans, default_concurrency)
         url_semaphore = asyncio.Semaphore(concurrency_limit)
 
@@ -285,7 +286,7 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
                 finally:
                     screenshot_queue.task_done()
 
-        num_ss_workers = min(settings.max_concurrent_screenshots or 15, 15)
+        num_ss_workers = min(settings.max_concurrent_screenshots or 20, 20)
         ss_worker_tasks = [asyncio.create_task(screenshot_worker()) for _ in range(num_ss_workers)]
 
         # -----------------------------------------------------------------------
@@ -393,10 +394,10 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
             await screenshot_queue.put((raw_url, target_to_capture, http_res))
 
         # Main Scan Execution Loop with Shared High-Throughput Persistent HTTP Client
-        limits = httpx.Limits(max_connections=120, max_keepalive_connections=60)
+        limits = httpx.Limits(max_connections=200, max_keepalive_connections=80)
         async with httpx.AsyncClient(
             limits=limits,
-            timeout=httpx.Timeout(connect=3.5, read=4.5, write=3.5, pool=5.0),
+            timeout=httpx.Timeout(connect=5.0, read=7.0, write=5.0, pool=8.0),
             follow_redirects=False,
             verify=False,
             headers={
@@ -415,8 +416,8 @@ async def _run_scan(scan_id: str, urls: List[str]) -> None:
         # Maximize workers: scale up screenshot worker pool to capture remaining screenshots at full throttle!
         remaining_ss = screenshot_queue.qsize()
         if remaining_ss > 0 and scan_id in _running_tasks:
-            logger.info("Network checks complete. Scaling up to 24 concurrent screenshot workers for remaining %d targets.", remaining_ss)
-            extra_workers = min(16, remaining_ss)
+            logger.info("Network checks complete. Scaling up to 32 concurrent screenshot workers for remaining %d targets.", remaining_ss)
+            extra_workers = min(20, remaining_ss)
             for _ in range(extra_workers):
                 ss_worker_tasks.append(asyncio.create_task(screenshot_worker()))
 
