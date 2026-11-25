@@ -5,10 +5,14 @@ Generates comprehensive Website Health & DNS Audit PDF reports using ReportLab.
 
 from __future__ import annotations
 
+import asyncio
 import os
+import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from xml.sax.saxutils import escape as _xml_escape
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
@@ -28,6 +32,20 @@ from reportlab.platypus import (
 from reportlab.pdfgen import canvas
 from backend.app.config import settings
 from backend.app.screenshots.capture import generate_diagnostic_screenshot
+
+
+def _safe_text(val: Any, max_len: Optional[int] = 300) -> str:
+    """Escape text for ReportLab Paragraph XML parser, normalize whitespace, and bound length."""
+    if val is None:
+        return ""
+    s = str(val)
+    # Remove ASCII control characters (except tab/newline/CR) that break XML parsing
+    s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", s)
+    # Collapse newlines/excessive whitespace so scraped titles never create multi-page table rows
+    s = re.sub(r"\s+", " ", s).strip()
+    if max_len and len(s) > max_len:
+        s = s[: max_len - 3] + "..."
+    return _xml_escape(s)
 
 
 class FastAuditCanvas(canvas.Canvas):
@@ -129,14 +147,25 @@ class PDFReportGenerator:
         status_filter: Optional[str] = None,
         report_mode: Optional[str] = None,
     ) -> str:
-        """Create the PDF report and write to output_path with status sorting & filtering.
-        
-        report_mode:
-            'summary': Fast high-density table without heavy per-page screenshots (recommended for > 50 targets).
-            'issues': Visual diagnostic screenshots for offline and error targets only.
-            'visual': Full visual inspection report including screenshots.
-            None: Auto-select ('summary' for > 50 targets, 'visual' for <= 50 targets).
-        """
+        """Create the PDF report in a worker thread so the FastAPI event loop stays responsive."""
+        return await asyncio.to_thread(
+            self._generate_sync,
+            scan,
+            results,
+            output_path,
+            status_filter,
+            report_mode,
+        )
+
+    def _generate_sync(
+        self,
+        scan: Dict[str, Any],
+        results: List[Dict[str, Any]],
+        output_path: str,
+        status_filter: Optional[str] = None,
+        report_mode: Optional[str] = None,
+    ) -> str:
+        """Synchronous PDF generation implementation (runs off the event loop)."""
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
         # 1. Apply status filtering if requested (ONLINE, OFFLINE, ERRORS)
@@ -173,8 +202,9 @@ class PDFReportGenerator:
         else:
             include_visuals = len(results) <= 50
 
+        tmp_output_path = output_path + ".tmp"
         doc = SimpleDocTemplate(
-            output_path,
+            tmp_output_path,
             pagesize=letter,
             leftMargin=54,
             rightMargin=54,
@@ -250,10 +280,10 @@ class PDFReportGenerator:
         source_label = uploaded_filename if uploaded_filename else "Direct URL Submission"
 
         meta_data = [
-            [Paragraph("<b>Audit ID:</b>", self.body_style), Paragraph(str(scan_id), self.code_style)],
-            [Paragraph("<b>Source / Uploaded File:</b>", self.body_style), Paragraph(f"<b>{source_label}</b>", self.body_style)],
-            [Paragraph("<b>Audit Timestamp:</b>", self.body_style), Paragraph(formatted_date, self.body_style)],
-            [Paragraph("<b>Report Scope:</b>", self.body_style), Paragraph(f"<b>{status_filter.upper() if status_filter else 'ALL (Sorted)'}</b>", self.body_style)],
+            [Paragraph("<b>Audit ID:</b>", self.body_style), Paragraph(_safe_text(scan_id), self.code_style)],
+            [Paragraph("<b>Source / Uploaded File:</b>", self.body_style), Paragraph(f"<b>{_safe_text(source_label)}</b>", self.body_style)],
+            [Paragraph("<b>Audit Timestamp:</b>", self.body_style), Paragraph(_safe_text(formatted_date), self.body_style)],
+            [Paragraph("<b>Report Scope:</b>", self.body_style), Paragraph(f"<b>{_safe_text(status_filter.upper() if status_filter else 'ALL (Sorted)')}</b>", self.body_style)],
             [Paragraph("<b>Total Targets in Report:</b>", self.body_style), Paragraph(str(total_urls), self.body_style)],
             [Paragraph("<b>Audit Engine:</b>", self.body_style), Paragraph("WebPulse Core v1.0 (dnspython, HTTPX, Playwright)", self.body_style)],
         ]
@@ -360,9 +390,9 @@ class PDFReportGenerator:
                 dns_cell = Paragraph("<font color='#16a34a'>RESOLVED</font>" if status != "DNS_ERROR" else "<font color='#dc2626'>FAILED</font>", self.body_style)
 
                 if final_url and orig_url and final_url.rstrip('/') != orig_url.rstrip('/'):
-                    domain_para = Paragraph(f"<font size='8'><b>{domain}</b><br/><font color='#2563eb'>&rarr; {final_url[:40]}</font></font>", self.body_style)
+                    domain_para = Paragraph(f"<font size='8'><b>{_safe_text(domain)}</b><br/><font color='#2563eb'>&rarr; {_safe_text(final_url[:40])}</font></font>", self.body_style)
                 else:
-                    domain_para = Paragraph(f"<font size='8.5'>{domain}</font>", self.body_style)
+                    domain_para = Paragraph(f"<font size='8.5'>{_safe_text(domain)}</font>", self.body_style)
 
                 data_rows.append([
                     domain_para,
@@ -406,6 +436,46 @@ class PDFReportGenerator:
             story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#4f46e5"), spaceBefore=4, spaceAfter=20))
 
             visual_results = results
+
+            # Pre-resolve and parallel-compress missing thumbnails so doc.build() is fast & PDF is compact
+            def _resolve_img(r_item: Dict[str, Any]) -> Optional[str]:
+                sp = r_item.get("screenshot_path")
+                if not sp:
+                    return None
+                for cand in (
+                    sp,
+                    os.path.join(settings.screenshots_dir, os.path.basename(sp)),
+                    os.path.join(settings.project_root, "storage", sp),
+                    os.path.join(settings.project_root, sp),
+                    os.path.join("storage", sp),
+                    os.path.join(".", sp),
+                ):
+                    if os.path.isfile(cand) and os.path.getsize(cand) > 0:
+                        return cand
+                return None
+
+            def _ensure_thumb(src_path: str) -> str:
+                thumb_path = src_path + ".thumb.jpg"
+                if os.path.isfile(thumb_path) and os.path.getsize(thumb_path) > 0:
+                    return thumb_path
+                try:
+                    from PIL import Image as PILImage
+                    with PILImage.open(src_path) as im:
+                        rgb_im = im.convert("RGB")
+                        rgb_im.thumbnail((560, 350))
+                        rgb_im.save(thumb_path, "JPEG", quality=60)
+                    if os.path.isfile(thumb_path):
+                        return thumb_path
+                except Exception:
+                    pass
+                return src_path
+
+            resolved_paths = [_resolve_img(r_item) for r_item in visual_results]
+            to_compress = [p for p in resolved_paths if p and not os.path.isfile(p + ".thumb.jpg")]
+            if to_compress:
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    list(pool.map(_ensure_thumb, to_compress))
+
             for idx, r in enumerate(visual_results, start=1):
                 domain = r.get("domain") or r.get("original_url", f"Site #{idx}")
                 orig_url = r.get("original_url", "")
@@ -425,8 +495,8 @@ class PDFReportGenerator:
                 # Website Header Bar
                 website_elements.append(
                     Paragraph(
-                        f"#{idx} &nbsp; <b>{domain}</b> &nbsp;&nbsp; "
-                        f"<font color='{status_color}'>[{status}]</font>",
+                        f"#{idx} &nbsp; <b>{_safe_text(domain)}</b> &nbsp;&nbsp; "
+                        f"<font color='{status_color}'>[{_safe_text(status)}]</font>",
                         self.h1_style,
                     )
                 )
@@ -434,24 +504,24 @@ class PDFReportGenerator:
 
                 # Details Key-Value Table
                 is_redirected = final_url and orig_url and final_url.rstrip('/') != orig_url.rstrip('/')
-                final_url_para = Paragraph(f"<font color='#2563eb'><b>{final_url}</b> [Redirected]</font>", self.code_style) if is_redirected else Paragraph(final_url, self.code_style)
+                final_url_para = Paragraph(f"<font color='#2563eb'><b>{_safe_text(final_url)}</b> [Redirected]</font>", self.code_style) if is_redirected else Paragraph(_safe_text(final_url), self.code_style)
 
                 site_details = [
-                    [Paragraph("<b>Original Target:</b>", self.body_style), Paragraph(orig_url, self.code_style)],
+                    [Paragraph("<b>Original Target:</b>", self.body_style), Paragraph(_safe_text(orig_url), self.code_style)],
                     [Paragraph("<b>Final URL:</b>", self.body_style), final_url_para],
-                    [Paragraph("<b>HTTP Status:</b>", self.body_style), Paragraph(http_code, self.body_style)],
-                    [Paragraph("<b>Response Time:</b>", self.body_style), Paragraph(resp_time, self.body_style)],
-                    [Paragraph("<b>Page Title:</b>", self.body_style), Paragraph(title, self.body_style)],
-                    [Paragraph("<b>Web Server:</b>", self.body_style), Paragraph(server_info, self.body_style)],
+                    [Paragraph("<b>HTTP Status:</b>", self.body_style), Paragraph(_safe_text(http_code), self.body_style)],
+                    [Paragraph("<b>Response Time:</b>", self.body_style), Paragraph(_safe_text(resp_time), self.body_style)],
+                    [Paragraph("<b>Page Title:</b>", self.body_style), Paragraph(_safe_text(title), self.body_style)],
+                    [Paragraph("<b>Web Server:</b>", self.body_style), Paragraph(_safe_text(server_info), self.body_style)],
                 ]
 
                 if error_msg != "None":
                     site_details.append([
                         Paragraph("<b>Diagnostic Error:</b>", self.body_style),
-                        Paragraph(f"<font color='#dc2626'>{error_msg}</font>", self.body_style),
+                        Paragraph(f"<font color='#dc2626'>{_safe_text(error_msg)}</font>", self.body_style),
                     ])
 
-                details_table = Table(site_details, colWidths=[120, 384])
+                details_table = Table(site_details, colWidths=[116, 376])
                 details_table.setStyle(
                     TableStyle([
                         ("VALIGN", (0, 0), (-1, -1), "TOP"),
@@ -498,21 +568,8 @@ class PDFReportGenerator:
 
                 if full_img_path and os.path.isfile(full_img_path):
                     try:
-                        # Compress / optimize image with PIL thumbnail to reduce memory & PDF size by 85%
-                        optimized_path = full_img_path
-                        try:
-                            from PIL import Image as PILImage
-                            thumb_path = full_img_path + ".thumb.jpg"
-                            if not os.path.isfile(thumb_path):
-                                with PILImage.open(full_img_path) as im:
-                                    rgb_im = im.convert("RGB")
-                                    rgb_im.thumbnail((640, 400))
-                                    rgb_im.save(thumb_path, "JPEG", quality=70, optimize=True)
-                            if os.path.isfile(thumb_path):
-                                optimized_path = thumb_path
-                        except Exception:
-                            pass
-
+                        thumb_path = full_img_path + ".thumb.jpg"
+                        optimized_path = thumb_path if os.path.isfile(thumb_path) else full_img_path
                         img = Image(optimized_path, width=480, height=270)
                         website_elements.append(img)
                         img_added = True
@@ -544,4 +601,5 @@ class PDFReportGenerator:
 
         # Build document with fast 1-pass canvas
         doc.build(story, canvasmaker=FastAuditCanvas)
+        os.replace(tmp_output_path, output_path)
         return output_path

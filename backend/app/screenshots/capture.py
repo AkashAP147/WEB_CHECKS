@@ -429,13 +429,13 @@ class BrowserWorkerPool:
                             navigated = False
                             nav_resp = None
                             try:
-                                # Use "commit" for fastest first-byte nav; falls back to domcontentloaded
+                                # Use "commit" for fastest first-byte nav (avoids blocking on slow third-party scripts)
                                 nav_resp = page.goto(primary_url, wait_until="commit", timeout=timeout_ms)
                                 navigated = True
                             except Exception:
                                 try:
                                     content = page.content()
-                                    if content and len(content) > 300:
+                                    if content and len(content) > 50:
                                         navigated = True
                                 except Exception:
                                     pass
@@ -443,28 +443,32 @@ class BrowserWorkerPool:
                             # Only try HTTP fallback if primary was HTTPS and target was NOT already marked TIMEOUT
                             if not navigated and primary_url.startswith("https://") and not (status_info and status_info.get("status") == "TIMEOUT"):
                                 try:
-                                    nav_resp = page.goto(alt_url, wait_until="commit", timeout=2500)
+                                    nav_resp = page.goto(alt_url, wait_until="commit", timeout=3500)
                                     navigated = True
                                 except Exception:
                                     try:
                                         content = page.content()
-                                        if content and len(content) > 300:
+                                        if content and len(content) > 50:
                                             navigated = True
                                     except Exception:
                                         pass
 
                             if navigated:
-                                # Brief 80ms paint breather for layout
+                                # Allow up to 1.5s for DOM/CSS/images to render without failing if a script hangs
                                 try:
-                                    page.wait_for_timeout(80)
+                                    page.wait_for_load_state("domcontentloaded", timeout=1500)
+                                except Exception:
+                                    pass
+                                try:
+                                    page.wait_for_timeout(250)
                                 except Exception:
                                     pass
 
                                 try:
-                                    page.screenshot(path=abs_path, full_page=False, type="png", timeout=2000, animations="disabled")
+                                    page.screenshot(path=abs_path, full_page=False, type="png", timeout=4500, animations="disabled")
                                 except Exception:
                                     try:
-                                        page.screenshot(path=abs_path, full_page=False, type="png", timeout=1200, animations="disabled")
+                                        page.screenshot(path=abs_path, full_page=False, type="png", timeout=2500, animations="disabled")
                                     except Exception:
                                         pass
                                 if os.path.exists(abs_path) and os.path.getsize(abs_path) > 1000:
@@ -625,8 +629,8 @@ class ScreenshotCapture:
                     "status_code": status_info.get("http_status_code") if status_info else None,
                 }
 
-            # Fast 4000ms timeout for HTTP_ERROR/SSL_ERROR; 6000ms for ONLINE
-            nav_timeout = 4000 if status in ("HTTP_ERROR", "SSL_ERROR") else 6000
+            # Fast 4000ms timeout for HTTP_ERROR/SSL_ERROR; 7500ms for ONLINE
+            nav_timeout = 4000 if status in ("HTTP_ERROR", "SSL_ERROR") else 7500
             pool = get_browser_pool()
             res = await pool.capture(
                 url=url,

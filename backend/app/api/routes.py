@@ -995,7 +995,17 @@ async def download_pdf_report(
     filepath = os.path.join(settings.reports_dir, filename)
 
     try:
-        # Always generate or regenerate when requested, filtered, or if missing
+        # Serve cached PDF immediately if scan is finished and file already exists (unless refresh=True).
+        # This also prevents overwriting the file if the browser issues a Range/Resume request.
+        scan_done = str(scan.get("status") or "").lower() in ("completed", "failed", "cancelled")
+        if not refresh and scan_done and os.path.isfile(filepath) and os.path.getsize(filepath) > 0:
+            return FileResponse(
+                filepath,
+                media_type="application/pdf",
+                filename=filename,
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+
         generator = PDFReportGenerator()
         await generator.generate(
             scan=scan,
